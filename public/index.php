@@ -55,10 +55,9 @@ if ($path === '/health') respond(200, ['ok'=>true,'service'=>'nira-website-build
 if ($path === '/' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') ui();
 if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     $expected = envv('NIRA_BUILDER_TOKEN');
-    if ($expected !== '') {
-        $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
-        if (!hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
-    }
+    if ($expected === '') respond(503, ['error'=>'Builder API is disabled until NIRA_BUILDER_TOKEN is configured.']);
+    $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
+    if (!hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
     $raw = file_get_contents('php://input', false, null, 0, MAX_REQUEST_BYTES + 1);
     if (strlen($raw) > MAX_REQUEST_BYTES) respond(413, ['error'=>'Request too large.']);
     $input = json_decode($raw ?: '', true);
