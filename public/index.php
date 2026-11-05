@@ -66,9 +66,9 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $name = preg_replace('/[^a-zA-Z0-9_-]/', '-', (string)($input['name'] ?? 'website'));
     if (strlen($prompt) < 20) respond(422, ['error'=>'কমপক্ষে ২০ অক্ষরের বিস্তারিত নির্দেশনা দিন।']);
     if (strlen($prompt) > 9000) respond(422, ['error'=>'নির্দেশনা খুব বড়।']);
-    $apiKey = envv('GEMINI_API_KEY');
+    $apiKey = envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY'));
     if ($apiKey === '') respond(503, ['error'=>'Server setup incomplete: GEMINI_API_KEY environment variable is missing.']);
-    $model = envv('GEMINI_MODEL', 'gemini-3.6-flash');
+    $model = envv('GEMINI_MODEL', 'gemini-2.5-flash');
     $system = "You are a senior web engineer. Return ONLY valid JSON with shape {\"files\": [{\"path\":\"relative/path\",\"content\":\"complete file content\"}]}. Generate a complete responsive, accessible website project based on the request. Include README.md and all necessary source/assets as text files. Do not include binaries, secrets, API keys, deployment credentials, or parent-directory paths. Keep it self-contained and production-conscious. Never claim payments are live without merchant credentials. Limit to 80 files and 200KB per file.";
     $payload = ['contents'=>[['parts'=>[['text'=>$system."\nUSER REQUEST:\n".$prompt]]]],'generationConfig'=>['responseMimeType'=>'application/json','temperature'=>0.3]];
     $ch = curl_init('https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey));
