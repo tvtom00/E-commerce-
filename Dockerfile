@@ -1,8 +1,8 @@
 FROM php:8.2-apache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libzip-dev unzip \
-    && docker-php-ext-install zip \
+    libzip-dev libcurl4-openssl-dev unzip \
+    && docker-php-ext-install curl zip \
     && a2enmod rewrite headers \
     && rm -rf /var/lib/apt/lists/*
 
