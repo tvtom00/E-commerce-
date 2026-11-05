@@ -27,7 +27,7 @@ function clean_name(string $name): string {
 
 function validate_laravel_project(array $rawFiles): array {
     $required = [
-        'composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
+        'Dockerfile','composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
         'routes/web.php','routes/auth.php','README.md','.env.example',
         '.github/workflows/laravel-validate.yml',
         'config/auth.php','config/database.php','config/services.php',
@@ -100,6 +100,12 @@ function validate_laravel_project(array $rawFiles): array {
     }
     foreach ($required as $path) {
         if (!array_key_exists($path, $files)) throw new RuntimeException('Laravel E-commerce output is missing required file: '.$path);
+    }
+    $dockerfile = $files['Dockerfile'];
+    foreach (['FROM php:', 'pdo_mysql', 'pdo_pgsql', 'composer install', 'EXPOSE 10000', 'artisan migrate'] as $dockerCheck) {
+        if (stripos($dockerfile, $dockerCheck) === false) {
+            throw new RuntimeException('Render Dockerfile is missing required runtime configuration: '.$dockerCheck);
+        }
     }
     $manifest = json_decode($files['composer.json'], true);
     if (!is_array($manifest) || !isset($manifest['require']['laravel/framework'], $manifest['require']['php'])) {
@@ -309,8 +315,19 @@ HTML;
 }
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 if ($path === '/health') {
+    $storageRoot = envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated');
+    $storageReady = is_dir($storageRoot) ? is_writable($storageRoot) : (is_writable(dirname($storageRoot)) || is_writable(dirname(__DIR__)));
+    $persistentPath = str_starts_with($storageRoot, '/var/data/') || str_starts_with($storageRoot, '/mnt/data/') || envv('NIRA_STORAGE_PERSISTENT') === 'true';
+    $health = [
+        'ok'=>true,
+        'service'=>'nira-website-builder',
+        'gemini_configured'=>envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) !== '',
+        'github_publishing_configured'=>envv('NIRA_GITHUB_TOKEN') !== '',
+        'storage_writable'=>$storageReady,
+        'persistent_storage_configured'=>$persistentPath,
+    ];
     if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD') { http_response_code(200); header('Content-Type: application/json; charset=utf-8'); exit; }
-    respond(200, ['ok'=>true,'service'=>'nira-website-builder']);
+    respond(200, $health);
 }
 if ($path === '/' && in_array(($_SERVER['REQUEST_METHOD'] ?? 'GET'), ['GET', 'HEAD'], true)) {
     if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD') { http_response_code(200); header('Content-Type: text/html; charset=utf-8'); exit; }
@@ -348,7 +365,19 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     foreach ($parts as $part) { if (isset($part['text']) && is_string($part['text'])) $text .= $part['text']; }
     $result = json_decode($text, true);
     if (!is_array($result) || !isset($result['files']) || !is_array($result['files'])) respond(502, ['error'=>'AI returned an invalid project format.']);
-    if (count($result['files']) < 1 || count($result['files']) > MAX_OUTPUT_FILES) respond(502, ['error'=>'Generated project file count is outside the allowed limit.']);
+    if (count($result['files']) < 1 || count($result['files']) >= MAX_OUTPUT_FILES) respond(502, ['error'=>'Generated project file count is outside the allowed limit after deployment files are added.']);
+    // Always provide a deterministic Render-compatible runtime file; never rely on Gemini
+    // remembering infrastructure boilerplate in a large source-generation response.
+    $hasDockerfile = false;
+    foreach ($result['files'] as $generatedFile) {
+        if (is_array($generatedFile) && ($generatedFile['path'] ?? '') === 'Dockerfile') { $hasDockerfile = true; break; }
+    }
+    if (!$hasDockerfile) {
+        $result['files'][] = [
+            'path'=>'Dockerfile',
+            'content'=>"FROM php:8.3-apache\\nRUN apt-get update && apt-get install -y --no-install-recommends git unzip libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev libicu-dev \\\\n    && docker-php-ext-configure gd --with-freetype --with-jpeg \\\\n    && docker-php-ext-install -j\\\"$(nproc)\\\" pdo_mysql pdo_pgsql mbstring bcmath exif gd zip intl opcache \\\\n    && a2enmod rewrite headers \\\\n    && sed -ri 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-available/000-default.conf \\\\n    && sed -ri 's/Listen 80/Listen 10000/' /etc/apache2/ports.conf \\\\n    && sed -ri 's/:80>/:10000>/' /etc/apache2/sites-available/000-default.conf \\\\n    && sed -ri '/<Directory/,/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/sites-available/000-default.conf \\\\n    && rm -rf /var/lib/apt/lists/*\\nCOPY --from=composer:2 /usr/bin/composer /usr/bin/composer\\nWORKDIR /var/www/html\\nCOPY . .\\nRUN composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \\\\n    && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache database \\\\n    && chown -R www-data:www-data storage bootstrap/cache database\\nENV APP_ENV=production APP_DEBUG=false DB_CONNECTION=mysql\\nEXPOSE 10000\\nCMD [\\\"sh\\\", \\\"-c\\\", \\\"php artisan migrate --force && apache2-foreground\\\"]\\n"
+        ];
+    }
     try { $validatedFiles = validate_laravel_project($result['files']); }
     catch (Throwable $e) { respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$e->getMessage()]); }
     if (!class_exists(ZipArchive::class)) respond(500, ['error'=>'ZIP extension is not available.']);
