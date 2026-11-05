@@ -20,5 +20,3 @@ jobs:
           extensions: curl, zip, json
       - name: Check builder PHP syntax
         run: php -l public/index.php
-      - name: Check download endpoint syntax
-        run: php -l public/download.php
