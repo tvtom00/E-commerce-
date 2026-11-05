@@ -119,7 +119,7 @@ function validate_laravel_project(array $rawFiles): array {
         }
     }
     if ($migrationNames) throw new RuntimeException('Laravel project is missing required MySQL migrations.');
-    if (!preg_match('/\\$table\\s*->\\s*json\\s*\\(\\s*[\\'\"]attributes[\\'\"]/', $productMigration)) {
+    if (!preg_match('/\$table\s*->\s*json\s*\(\s*["\x27]attributes["\x27]/', $productMigration)) {
         throw new RuntimeException('Products must store structured AI attributes in a JSON database column.');
     }
     $critical = [
