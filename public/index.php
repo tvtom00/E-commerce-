@@ -312,7 +312,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
 if ($path === '/download.php') {
     $id = (string)($_GET['id'] ?? '');
     if (!preg_match('/^[a-f0-9]{24}$/', $id)) { http_response_code(404); exit; }
-    $dir = __DIR__.'/../storage/generated/'.$id;
+    $storageRoot = rtrim(envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated'), '/');
+    $dir = $storageRoot.'/'.$id;
     $files = glob($dir.'/*.zip') ?: [];
     if (!$files || !is_file($files[0])) { http_response_code(404); exit; }
     header('Content-Type: application/zip'); header('Content-Disposition: attachment; filename="'.basename($files[0]).'"');
