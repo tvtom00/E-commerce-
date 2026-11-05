@@ -373,10 +373,28 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         if (is_array($generatedFile) && ($generatedFile['path'] ?? '') === 'Dockerfile') { $hasDockerfile = true; break; }
     }
     if (!$hasDockerfile) {
-        $result['files'][] = [
-            'path'=>'Dockerfile',
-            'content'=>"FROM php:8.3-apache\\nRUN apt-get update && apt-get install -y --no-install-recommends git unzip libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev libicu-dev \\\\n    && docker-php-ext-configure gd --with-freetype --with-jpeg \\\\n    && docker-php-ext-install -j\\\"$(nproc)\\\" pdo_mysql pdo_pgsql mbstring bcmath exif gd zip intl opcache \\\\n    && a2enmod rewrite headers \\\\n    && sed -ri 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-available/000-default.conf \\\\n    && sed -ri 's/Listen 80/Listen 10000/' /etc/apache2/ports.conf \\\\n    && sed -ri 's/:80>/:10000>/' /etc/apache2/sites-available/000-default.conf \\\\n    && sed -ri '/<Directory/,/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/sites-available/000-default.conf \\\\n    && rm -rf /var/lib/apt/lists/*\\nCOPY --from=composer:2 /usr/bin/composer /usr/bin/composer\\nWORKDIR /var/www/html\\nCOPY . .\\nRUN composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \\\\n    && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache database \\\\n    && chown -R www-data:www-data storage bootstrap/cache database\\nENV APP_ENV=production APP_DEBUG=false DB_CONNECTION=mysql\\nEXPOSE 10000\\nCMD [\\\"sh\\\", \\\"-c\\\", \\\"php artisan migrate --force && apache2-foreground\\\"]\\n"
-        ];
+        $dockerContent = <<<'DOCKER'
+FROM php:8.3-apache
+RUN apt-get update && apt-get install -y --no-install-recommends git unzip libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev libicu-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install -j"$(nproc)" pdo_mysql pdo_pgsql mbstring bcmath exif gd zip intl opcache \
+    && a2enmod rewrite headers \
+    && sed -ri 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-available/000-default.conf \
+    && sed -ri 's/Listen 80/Listen 10000/' /etc/apache2/ports.conf \
+    && sed -ri 's/:80>/:10000>/' /etc/apache2/sites-available/000-default.conf \
+    && sed -ri '/<Directory/,/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/sites-available/000-default.conf \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+WORKDIR /var/www/html
+COPY . .
+RUN composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \
+    && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache database \
+    && chown -R www-data:www-data storage bootstrap/cache database
+ENV APP_ENV=production APP_DEBUG=false DB_CONNECTION=mysql
+EXPOSE 10000
+CMD ["sh", "-c", "php artisan migrate --force && apache2-foreground"]
+DOCKER;
+        $result['files'][] = ['path'=>'Dockerfile','content'=>$dockerContent];
     }
     try { $validatedFiles = validate_laravel_project($result['files']); }
     catch (Throwable $e) { respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$e->getMessage()]); }
