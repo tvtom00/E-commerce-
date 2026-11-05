@@ -37,12 +37,12 @@ textarea{min-height:160px;resize:vertical}button{background:#6d7cff;color:white;
 button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#cbd5e1}.small{font-size:13px;color:#92a2bf}
 </style><main><h1>Nira AI Website Builder</h1><p>আপনার ওয়েবসাইটের ধরন, পেজ, ডিজাইন ও ফিচার লিখুন। Nira AI একটি প্রজেক্ট ZIP তৈরি করবে।</p>
 <label>ওয়েবসাইটের নির্দেশনা</label><textarea id="prompt" placeholder="যেমন: আধুনিক e-commerce website, product catalog, cart, admin dashboard, Bangla/English..."></textarea>
-<label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40">
+<label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40">\n<label>Access token (যদি সার্ভারে সেট করা থাকে)</label><input id="token" type="password" autocomplete="off" placeholder="NIRA_BUILDER_TOKEN">
 <button id="go">Generate website ZIP</button><div id="status"></div><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
 b.onclick=async()=>{b.disabled=true;s.textContent='প্রজেক্ট তৈরি হচ্ছে...';try{
-const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value})});
+const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value})});
 const j=await r.json();if(!r.ok)throw Error(j.error||'Generation failed');
 s.innerHTML='';const a=document.createElement('a');a.href=j.download;a.textContent='Download '+j.name+'.zip';a.style='display:inline-block;margin-top:12px;color:#aab7ff;font-weight:bold';s.append('ওয়েবসাইট ZIP প্রস্তুত: ',a);
 }catch(e){s.textContent='সমস্যা: '+e.message}finally{b.disabled=false}};
