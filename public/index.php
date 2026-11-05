@@ -23,6 +23,145 @@ function clean_name(string $name): string {
     if (!preg_match('/^[a-zA-Z0-9._\/-]+$/', $name)) throw new RuntimeException('Unsupported file path.');
     return $name;
 }
+
+function validate_laravel_project(array $rawFiles): array {
+    $required = [
+        'composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
+        'routes/web.php','routes/auth.php','README.md','.env.example',
+        '.github/workflows/laravel-validate.yml',
+        'config/auth.php','config/database.php','config/services.php',
+        'resources/views/layouts/app.blade.php','resources/views/store/index.blade.php',
+        'resources/views/store/products/show.blade.php','resources/views/cart/index.blade.php',
+        'resources/views/checkout/index.blade.php','resources/views/admin/dashboard.blade.php',
+        'resources/views/admin/products/index.blade.php','resources/views/admin/products/create.blade.php',
+        'resources/views/admin/orders/index.blade.php','resources/views/admin/categories/index.blade.php',
+        'resources/views/admin/inventory/index.blade.php','resources/views/admin/subadmins/index.blade.php',
+        'resources/views/admin/customers/index.blade.php','resources/views/admin/settings/index.blade.php',
+        'resources/views/admin/settings/payments.blade.php','resources/views/components/product-chat.blade.php',
+        'resources/css/app.css','resources/js/app.js',
+        'app/Models/Product.php','app/Models/Category.php','app/Models/Order.php',
+        'app/Models/Setting.php','app/Models/Role.php',
+        'app/Http/Controllers/StoreController.php','app/Http/Controllers/CartController.php',
+        'app/Http/Controllers/CheckoutController.php',
+        'app/Http/Controllers/Admin/ProductController.php',
+        'app/Http/Controllers/Admin/OrderController.php',
+        'app/Http/Controllers/Admin/SettingsController.php',
+        'app/Http/Controllers/Admin/CategoryController.php',
+        'app/Http/Controllers/Admin/InventoryController.php',
+        'app/Http/Controllers/Admin/SubAdminController.php',
+        'app/Http/Controllers/Auth/GoogleController.php',
+        'app/Http/Controllers/Chat/ProductChatController.php',
+        'app/Http/Controllers/PaymentWebhookController.php',
+        'app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php',
+        'app/Http/Requests/StoreProductRequest.php',
+        'app/Services/Payments/PaymentGateway.php',
+        'app/Services/Payments/ConfiguredGateway.php',
+        'app/Services/TelegramNotifier.php','app/Services/ProductAssistant.php',
+        'tests/Feature/StorefrontTest.php','tests/Feature/AdminAuthorizationTest.php',
+        'tests/Feature/ProductAssistantTest.php','tests/Feature/PaymentWebhookTest.php',
+        'tests/Feature/GoogleOAuthTest.php','tests/Feature/TelegramSettingsTest.php',
+        'tests/Feature/SubAdminAuthorizationTest.php','tests/Feature/CheckoutTest.php',
+        'tests/Feature/PaymentGatewayTest.php','tests/Feature/CategoryInventoryTest.php',
+    ];
+    if (count($rawFiles) < count($required) || count($rawFiles) > MAX_OUTPUT_FILES) {
+        throw new RuntimeException('Laravel E-commerce project is incomplete or exceeds the file limit.');
+    }
+    $files = [];
+    foreach ($rawFiles as $file) {
+        if (!is_array($file) || !isset($file['path'], $file['content']) || !is_string($file['path']) || !is_string($file['content'])) {
+            throw new RuntimeException('Every generated file must contain a text path and content.');
+        }
+        $path = clean_name($file['path']);
+        $parts = explode('/', $path);
+        if (in_array('', $parts, true) || in_array('.', $parts, true) || in_array('..', $parts, true)
+            || in_array('vendor', $parts, true) || in_array('node_modules', $parts, true)
+            || in_array('.git', $parts, true) || in_array('storage', $parts, true)) {
+            throw new RuntimeException('Generated project contains an unsafe path.');
+        }
+        $base = strtolower((string)end($parts));
+        if (($base === '.env' || str_starts_with($base, '.env.')) && $base !== '.env.example') {
+            throw new RuntimeException('Real environment files and credentials are not allowed in the ZIP.');
+        }
+        if (isset($files[$path])) throw new RuntimeException('Generated project contains a duplicate path.');
+        if (strlen($file['content']) > MAX_FILE_BYTES) throw new RuntimeException('A generated file exceeded the size limit.');
+        if (!preg_match('/\\.(php|blade\\.php|css|js|json|md|ya?ml|xml|txt|htaccess)$/i', $path)
+            && !in_array($base, ['artisan','dockerfile','.gitignore'], true)) {
+            throw new RuntimeException('Generated project contains an unsupported or binary file.');
+        }
+        if (preg_match('/(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{30,}|GOCSPX-[A-Za-z0-9_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{25,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/', $file['content'])) {
+            throw new RuntimeException('A possible secret was found in generated source. Use environment variables instead.');
+        }
+        $files[$path] = $file['content'];
+    }
+    foreach ($required as $path) {
+        if (!array_key_exists($path, $files)) throw new RuntimeException('Laravel E-commerce output is missing required file: '.$path);
+    }
+    $manifest = json_decode($files['composer.json'], true);
+    if (!is_array($manifest) || !isset($manifest['require']['laravel/framework'], $manifest['require']['php'])) {
+        throw new RuntimeException('composer.json must require laravel/framework and declare a supported PHP version.');
+    }
+    if (!str_contains(strtolower($files['config/database.php']), 'mysql')
+        || !preg_match('/(?m)^DB_CONNECTION=mysql\\s*$/', $files['.env.example'])) {
+        throw new RuntimeException('Production configuration must use MySQL; SQLite-only projects are not accepted.');
+    }
+    $workflow = $files['.github/workflows/laravel-validate.yml'];
+    foreach (['composer validate','composer install','php -l','php artisan test'] as $check) {
+        if (stripos($workflow, $check) === false) throw new RuntimeException('Laravel CI workflow is missing: '.$check);
+    }
+    $productMigration = '';
+    $migrationNames = ['create_products','create_categories','create_orders','create_order_items','create_settings','create_roles'];
+    foreach ($files as $path => $source) {
+        if (str_starts_with($path, 'database/migrations/')) {
+            foreach ($migrationNames as $migration) {
+                if (str_contains($path, $migration)) $migrationNames = array_values(array_diff($migrationNames, [$migration]));
+            }
+            if (str_starts_with($path, 'database/migrations/') && str_contains($path, 'create_products')) $productMigration = $source;
+        }
+    }
+    if ($migrationNames) throw new RuntimeException('Laravel project is missing required MySQL migrations.');
+    if (!preg_match('/\\$table\\s*->\\s*json\\s*\\(\\s*[\\'\"]attributes[\\'\"]/', $productMigration)) {
+        throw new RuntimeException('Products must store structured AI attributes in a JSON database column.');
+    }
+    $critical = [
+        'app/Services/Payments/PaymentGateway.php',
+        'app/Services/Payments/ConfiguredGateway.php',
+        'app/Services/TelegramNotifier.php',
+        'app/Services/ProductAssistant.php',
+        'app/Http/Controllers/Admin/ProductController.php',
+        'app/Http/Controllers/Admin/OrderController.php',
+        'app/Http/Controllers/Admin/SettingsController.php',
+        'app/Http/Controllers/Auth/GoogleController.php',
+        'app/Http/Controllers/Chat/ProductChatController.php',
+        'app/Http/Controllers/PaymentWebhookController.php',
+        'app/Http/Middleware/EnsureRole.php',
+        'app/Policies/OrderPolicy.php',
+    ];
+    foreach ($critical as $path) {
+        if (strlen(trim($files[$path])) < 120 || preg_match('/(?i)(TODO|placeholder|not implemented|stub only)/', $files[$path])) {
+            throw new RuntimeException('A required Laravel module is only a placeholder: '.$path);
+        }
+    }
+    $checks = [
+        'app/Services/Payments/PaymentGateway.php' => ['createPayment','verifyWebhook'],
+        'app/Services/Payments/ConfiguredGateway.php' => ['endpoint','secret','sandbox','verifyWebhook'],
+        'app/Services/TelegramNotifier.php' => ['api.telegram.org','sendMessage','chat_id'],
+        'app/Services/ProductAssistant.php' => ['generateContent','json_decode','attributes'],
+        'app/Http/Controllers/PaymentWebhookController.php' => ['verifyWebhook','amount','idempot'],
+        'app/Http/Middleware/EnsureRole.php' => ['role','abort'],
+        'app/Policies/OrderPolicy.php' => ['sub-admin','order'],
+    ];
+    foreach ($checks as $path => $needles) {
+        foreach ($needles as $needle) {
+            if (stripos($files[$path], $needle) === false) throw new RuntimeException('A Laravel module is missing required behavior: '.$path);
+        }
+    }
+    $all = implode("\\n", array_values($files));
+    if (!str_contains($all, 'Crypt::encryptString') || !str_contains($all, 'Crypt::decryptString')) {
+        throw new RuntimeException('Payment and integration secrets must be encrypted at rest.');
+    }
+    return $files;
+}
+
 function ui(): never {
     header('Content-Type: text/html; charset=utf-8');
     echo <<<'HTML'
@@ -74,7 +213,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $apiKey = envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY'));
     if ($apiKey === '') respond(503, ['error'=>'Server setup incomplete: GEMINI_API_KEY environment variable is missing.']);
     $model = envv('GEMINI_MODEL', 'gemini-2.5-flash');
-    $system = "You are a senior web engineer. Return ONLY valid JSON with shape {\"files\": [{\"path\":\"relative/path\",\"content\":\"complete file content\"}]}. Generate a complete responsive, accessible website project based on the request. Include README.md and all necessary source/assets as text files. Do not include binaries, secrets, API keys, deployment credentials, or parent-directory paths. Keep it self-contained and production-conscious. Never claim payments are live without merchant credentials. Limit to 80 files and 200KB per file.";
+    $system = "You are Nira's Laravel E-commerce generator. Return ONLY valid JSON: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file text\"}]}. MANDATORY: generate a complete Laravel Framework application, never Core PHP, plain PHP, WordPress, Node-only, or a static mockup. Require laravel/framework and a supported PHP version in composer.json. Generate at most 80 files, each <=200KB. Include the complete Laravel app: artisan, bootstrap/app.php, public/index.php and .htaccess, routes/web.php and auth.php, MySQL config and .env.example, models, controllers, middleware, policies, requests, migrations, seeders, Blade storefront/admin views, CSS/JS, feature tests, README, and .github/workflows/laravel-validate.yml. Required modules: responsive customer-specific storefront, search, product detail, cart, checkout, customer accounts/order history, owner admin, product/category/inventory CRUD, orders/customers, sub-admin restricted to order management with server-side authorization, JSON product attributes, Gemini product description JSON generation and live product chat, Telegram notifications/settings, Google OAuth configuration, provider-neutral configurable payment adapter and secure webhook. Derive store name, niche, catalog, currency, colors, layout, language and brand from the user's brief; do not hardcode a demo shop. Use MySQL for production and include cPanel installation instructions. Encrypt integration/payment credentials at rest, mask secrets in admin UI, never expose secrets to browser JS or logs. Payment adapters must verify webhook signatures server-side, amount/currency/order, idempotency and atomic updates. Never invent a provider API or claim a real payment integration without official docs and sandbox credentials; keep provider setup disabled/pending until configured. Never include real credentials, binaries, vendor, node_modules, .git, .env, or generated secrets. Include meaningful feature tests for storefront, admin/subadmin authorization, products/JSON chat, Telegram settings, Google OAuth, checkout, and payment webhooks. CI must run composer validate, composer install, php -l and php artisan test. Do not execute generated PHP on this builder server. Return complete files only, no markdown fences.";
     $payload = ['contents'=>[['parts'=>[['text'=>$system."\nUSER REQUEST:\n".$prompt]]]],'generationConfig'=>['responseMimeType'=>'application/json','temperature'=>0.3]];
     $ch = curl_init('https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey));
     curl_setopt_array($ch, [CURLOPT_POST=>true,CURLOPT_HTTPHEADER=>['Content-Type: application/json'],CURLOPT_POSTFIELDS=>json_encode($payload),CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>180]);
@@ -86,6 +225,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $result = json_decode($text, true);
     if (!is_array($result) || !isset($result['files']) || !is_array($result['files'])) respond(502, ['error'=>'AI returned an invalid project format.']);
     if (count($result['files']) < 1 || count($result['files']) > MAX_OUTPUT_FILES) respond(502, ['error'=>'Generated project file count is outside the allowed limit.']);
+    try { $validatedFiles = validate_laravel_project($result['files']); }
+    catch (Throwable $e) { respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$e->getMessage()]); }
     if (!class_exists(ZipArchive::class)) respond(500, ['error'=>'ZIP extension is not available.']);
     $id = bin2hex(random_bytes(12)); $base = __DIR__.'/../storage/generated/'.$id;
     if (!mkdir($base, 0750, true)) respond(500, ['error'=>'Could not create project workspace.']);
@@ -93,11 +234,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $zip = new ZipArchive();
     if ($zip->open($zipPath, ZipArchive::CREATE|ZipArchive::OVERWRITE) !== true) respond(500, ['error'=>'Could not create ZIP.']);
     try {
-        foreach ($result['files'] as $file) {
-            if (!is_array($file) || !isset($file['path'],$file['content']) || !is_string($file['content'])) continue;
-            $rel = clean_name((string)$file['path']);
-            if (strlen($file['content']) > MAX_FILE_BYTES) throw new RuntimeException('A generated file exceeded the size limit.');
-            $zip->addFromString($rel, $file['content']);
+        foreach ($validatedFiles as $rel => $source) {
+            $zip->addFromString($rel, $source);
         }
         $zip->close();
     } catch (Throwable $e) { $zip->close(); respond(422, ['error'=>$e->getMessage()]); }
