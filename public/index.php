@@ -265,7 +265,7 @@ function publish_private_github_project(string $projectName, array $files, strin
         'message'=>'Generate customer Laravel e-commerce project',
         'tree'=>$tree['sha'],'parents'=>[$baseSha],
     ]);
-    $branch = 'nira/generated-store';
+    $branch = 'nira-generated';
     github_api('POST', '/repos/'.$owner.'/'.$repoName.'/git/refs', $token, [
         'ref'=>'refs/heads/'.$branch,'sha'=>$commit['sha'],
     ]);
