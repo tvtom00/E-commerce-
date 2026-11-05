@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/enforce-laravel-ecommerce-output
+      - feature/github-project-publishing
   pull_request:
     branches:
       - main
@@ -19,4 +20,4 @@ jobs:
           php-version: '8.2'
           extensions: curl, zip, json
       - name: Check builder PHP syntax
-        run: php -l public/index.php
+        run: find . -type f -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l
