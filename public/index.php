@@ -124,6 +124,61 @@ function validate_laravel_project(array $rawFiles): array {
         }
     }
     if ($migrationNames) throw new RuntimeException('Laravel project is missing required MySQL migrations.');
+    $requiredMigrationGroups = ['create_carts','create_cart_items','create_inventory_movements','create_payment_transactions','create_audit_events'];
+    foreach ($requiredMigrationGroups as $group) {
+        $found = false;
+        foreach (array_keys($files) as $candidate) {
+            if (str_starts_with($candidate, 'database/migrations/') && str_contains($candidate, $group)) { $found = true; break; }
+        }
+        if (!$found) throw new RuntimeException('Laravel project is missing persistent data migration: '.$group);
+    }
+    $databaseConfig = $files['config/database.php'];
+    if (!str_contains(strtolower($databaseConfig), 'pgsql')
+        || !str_contains($databaseConfig, 'DB_URL')
+        || !str_contains($databaseConfig, 'DATABASE_URL')
+        || !preg_match('/[\x27"]url[\x27"]\\s*=>\\s*env\\([\x27"]DB_URL[\x27"]/', $databaseConfig)) {
+        throw new RuntimeException('Database config must support MySQL, PostgreSQL and Laravel DB_URL.');
+    }
+    $envExample = $files['.env.example'];
+    if (!preg_match('/(?m)^DB_CONNECTION=mysql\\s*$/', $envExample)) {
+        throw new RuntimeException('The cPanel-ready .env.example must default to MySQL.');
+    }
+    $adminSettings = $files['resources/views/admin/settings/index.blade.php'];
+    $settingsController = $files['app/Http/Controllers/Admin/SettingsController.php'];
+    foreach (['telegram','google','payment','theme','shipping','tax'] as $section) {
+        if (stripos($adminSettings, $section) === false || stripos($settingsController, $section) === false) {
+            throw new RuntimeException('Owner Admin Panel is missing a configurable settings section: '.$section);
+        }
+    }
+    foreach (['Not configured','Connection failed','Configured'] as $status) {
+        if (stripos($settingsController, $status) === false && stripos($adminSettings, $status) === false) {
+            throw new RuntimeException('Integration settings must expose truthful configuration status: '.$status);
+        }
+    }
+    $telegram = $files['app/Services/TelegramNotifier.php'];
+    foreach (['api.telegram.org','sendMessage','chat_id'] as $needle) {
+        if (stripos($telegram, $needle) === false) throw new RuntimeException('Telegram notifier is missing required behavior.');
+    }
+    $google = $files['app/Http/Controllers/Auth/GoogleController.php'];
+    foreach (['state','hash_equals','Socialite'] as $needle) {
+        if (stripos($google, $needle) === false) throw new RuntimeException('Google OAuth must validate state and safely handle missing credentials.');
+    }
+    $paymentSettings = $files['resources/views/admin/settings/payments.blade.php'];
+    foreach (['sandbox','live','endpoint','api_key','api_secret','merchant'] as $field) {
+        if (stripos($paymentSettings, $field) === false) throw new RuntimeException('Payment Admin Panel is missing configurable field: '.$field);
+    }
+    $requiredFeatureTests = [
+        'tests/Feature/StorefrontTest.php','tests/Feature/AdminAuthorizationTest.php',
+        'tests/Feature/ProductAssistantTest.php','tests/Feature/PaymentWebhookTest.php',
+        'tests/Feature/GoogleOAuthTest.php','tests/Feature/TelegramSettingsTest.php',
+        'tests/Feature/SubAdminAuthorizationTest.php','tests/Feature/CheckoutTest.php',
+        'tests/Feature/PaymentGatewayTest.php','tests/Feature/CategoryInventoryTest.php',
+    ];
+    foreach ($requiredFeatureTests as $testPath) {
+        if (!isset($files[$testPath]) || strlen($files[$testPath]) < 180 || !preg_match('/assert|expect/i', $files[$testPath])) {
+            throw new RuntimeException('A required feature test is missing assertions: '.$testPath);
+        }
+    }
     if (!preg_match('/\$table\s*->\s*json\s*\(\s*["\x27]attributes["\x27]/', $productMigration)) {
         throw new RuntimeException('Products must store structured AI attributes in a JSON database column.');
     }
