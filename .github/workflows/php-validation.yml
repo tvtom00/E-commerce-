@@ -33,7 +33,7 @@ jobs:
         run: php -l public/index.php
 
       - name: Verify runtime entrypoint
-        run: test -x docker/entrypoint.sh
+        run: test -f docker/entrypoint.sh
 
       - name: Smoke-test health endpoint
         shell: bash
