@@ -32,8 +32,11 @@ jobs:
       - name: PHP syntax validation
         run: php -l public/index.php
 
-      - name: Verify runtime entrypoint
-        run: test -f docker/entrypoint.sh
+      - name: Verify runtime and deployment files
+        run: |
+          test -f docker/entrypoint.sh
+          test -f Dockerfile
+          grep -q "EXPOSE 10000" Dockerfile
 
       - name: Smoke-test health endpoint
         shell: bash
@@ -42,7 +45,10 @@ jobs:
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           for attempt in {1..20}; do
-            if curl --fail --silent http://127.0.0.1:8080/health; then
+            if curl --fail --silent http://127.0.0.1:8080/health > /tmp/nira-builder-health.json; then
+              grep -q '"ok":true' /tmp/nira-builder-health.json
+              grep -q '"gemini_configured":' /tmp/nira-builder-health.json
+              grep -q '"persistent_storage_configured":' /tmp/nira-builder-health.json
               exit 0
             fi
             sleep 1
