@@ -51,8 +51,14 @@ HTML;
     exit;
 }
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
-if ($path === '/health') respond(200, ['ok'=>true,'service'=>'nira-website-builder']);
-if ($path === '/' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') ui();
+if ($path === '/health') {
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD') { http_response_code(200); header('Content-Type: application/json; charset=utf-8'); exit; }
+    respond(200, ['ok'=>true,'service'=>'nira-website-builder']);
+}
+if ($path === '/' && in_array(($_SERVER['REQUEST_METHOD'] ?? 'GET'), ['GET', 'HEAD'], true)) {
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD') { http_response_code(200); header('Content-Type: text/html; charset=utf-8'); exit; }
+    ui();
+}
 if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     $expected = envv('NIRA_BUILDER_TOKEN');
     if ($expected === '') respond(503, ['error'=>'Builder API is disabled until NIRA_BUILDER_TOKEN is configured.']);
