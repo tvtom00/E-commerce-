@@ -85,7 +85,7 @@ function validate_laravel_project(array $rawFiles): array {
         if (isset($files[$path])) throw new RuntimeException('Generated project contains a duplicate path.');
         if (strlen($file['content']) > MAX_FILE_BYTES) throw new RuntimeException('A generated file exceeded the size limit.');
         if (!preg_match('/\\.(php|blade\\.php|css|js|json|md|ya?ml|xml|txt|htaccess)$/i', $path)
-            && !in_array($base, ['artisan','dockerfile','.gitignore'], true)) {
+            && !in_array($base, ['artisan','dockerfile','.gitignore','.env.example'], true)) {
             throw new RuntimeException('Generated project contains an unsupported or binary file.');
         }
         if (preg_match('/(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{30,}|GOCSPX-[A-Za-z0-9_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{25,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/', $file['content'])) {
