@@ -229,6 +229,65 @@ function validate_laravel_project(array $rawFiles): array {
 }
 
 
+
+function s3_configured(): bool {
+    return envv('NIRA_S3_ENDPOINT') !== '' && envv('NIRA_S3_BUCKET') !== ''
+        && envv('NIRA_S3_ACCESS_KEY_ID') !== '' && envv('NIRA_S3_SECRET_ACCESS_KEY') !== '';
+}
+function s3_object_request(string $method, string $key, string $body = ''): string {
+    $endpoint = rtrim(envv('NIRA_S3_ENDPOINT'), '/');
+    $bucket = envv('NIRA_S3_BUCKET');
+    $access = envv('NIRA_S3_ACCESS_KEY_ID');
+    $secret = envv('NIRA_S3_SECRET_ACCESS_KEY');
+    $region = envv('NIRA_S3_REGION', 'auto');
+    if ($endpoint === '' || $bucket === '' || $access === '' || $secret === '') {
+        throw new RuntimeException('S3-compatible storage is not configured.');
+    }
+    $parts = parse_url($endpoint);
+    if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+        throw new RuntimeException('NIRA_S3_ENDPOINT must be a complete HTTPS endpoint URL.');
+    }
+    if (strtolower((string)$parts['scheme']) !== 'https') {
+        throw new RuntimeException('External object storage endpoint must use HTTPS.');
+    }
+    $host = $parts['host'].(isset($parts['port']) ? ':'.$parts['port'] : '');
+    $prefix = rtrim((string)($parts['path'] ?? ''), '/');
+    $encodedKey = implode('/', array_map('rawurlencode', explode('/', ltrim($key, '/'))));
+    $uri = $prefix.'/'.rawurlencode($bucket).'/'.$encodedKey;
+    $url = $parts['scheme'].'://'.$host.$uri;
+    $now = gmdate('Ymd\THis\Z');
+    $date = substr($now, 0, 8);
+    $payloadHash = hash('sha256', $body);
+    $canonicalHeaders = "host:".$host."\n"."x-amz-content-sha256:".$payloadHash."\n"."x-amz-date:".$now."\n";
+    $signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+    $canonicalRequest = $method."\n".$uri."\n\n".$canonicalHeaders."\n".$signedHeaders."\n".$payloadHash;
+    $scope = $date.'/'.$region.'/s3/aws4_request';
+    $stringToSign = "AWS4-HMAC-SHA256\n".$now."\n".$scope."\n".hash('sha256', $canonicalRequest);
+    $kDate = hash_hmac('sha256', $date, 'AWS4'.$secret, true);
+    $kRegion = hash_hmac('sha256', $region, $kDate, true);
+    $kService = hash_hmac('sha256', 's3', $kRegion, true);
+    $kSigning = hash_hmac('sha256', 'aws4_request', $kService, true);
+    $signature = hash_hmac('sha256', $stringToSign, $kSigning);
+    $authorization = 'Authorization: AWS4-HMAC-SHA256 Credential='.$access.'/'.$scope.', SignedHeaders='.$signedHeaders.', Signature='.$signature;
+    $headers = [
+        'Host: '.$host, 'x-amz-date: '.$now, 'x-amz-content-sha256: '.$payloadHash,
+        $authorization, 'Content-Type: application/zip',
+    ];
+    $ch = curl_init($url);
+    $options = [CURLOPT_CUSTOMREQUEST=>$method, CURLOPT_HTTPHEADER=>$headers, CURLOPT_RETURNTRANSFER=>true,
+        CURLOPT_CONNECTTIMEOUT=>15, CURLOPT_TIMEOUT=>90];
+    if ($method === 'PUT') $options[CURLOPT_POSTFIELDS] = $body;
+    curl_setopt_array($ch, $options);
+    $response = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    if (!is_string($response) || $status < 200 || $status >= 300) {
+        throw new RuntimeException('Object storage '.$method.' failed (HTTP '.$status.'): '.($error ?: substr((string)$response, 0, 300)));
+    }
+    return $response;
+}
+
 function github_api(string $method, string $path, string $token, ?array $payload = null): array {
     $ch = curl_init('https://api.github.com'.$path);
     $headers = ['Accept: application/vnd.github+json','Authorization: Bearer '.$token,'X-GitHub-Api-Version: 2022-11-28','User-Agent: Nira-Website-Builder'];
@@ -316,8 +375,8 @@ HTML;
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 if ($path === '/health') {
     $storageRoot = envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated');
-    $storageReady = is_dir($storageRoot) ? is_writable($storageRoot) : (is_writable(dirname($storageRoot)) || is_writable(dirname(__DIR__)));
-    $persistentPath = str_starts_with($storageRoot, '/var/data/') || str_starts_with($storageRoot, '/mnt/data/') || envv('NIRA_STORAGE_PERSISTENT') === 'true';
+    $storageReady = s3_configured() || (is_dir($storageRoot) ? is_writable($storageRoot) : (is_writable(dirname($storageRoot)) || is_writable(dirname(__DIR__))));
+    $persistentPath = s3_configured() || str_starts_with($storageRoot, '/var/data/') || str_starts_with($storageRoot, '/mnt/data/') || envv('NIRA_STORAGE_PERSISTENT') === 'true';
     $health = [
         'ok'=>true,
         'service'=>'nira-website-builder',
@@ -502,7 +561,7 @@ DOCKER;
     if (!is_dir($storageRoot) && !mkdir($storageRoot, 0750, true) && !is_dir($storageRoot)) respond(500, ['error'=>'Could not initialize generated-project storage.']);
     $base = rtrim($storageRoot, '/').'/'.$id;
     if (!mkdir($base, 0750, true)) respond(500, ['error'=>'Could not create project workspace.']);
-    $zipPath = $base.'/'.($name ?: 'website').'.zip';
+    $zipPath = $base.'/project.zip';
     $zip = new ZipArchive();
     if ($zip->open($zipPath, ZipArchive::CREATE|ZipArchive::OVERWRITE) !== true) respond(500, ['error'=>'Could not create ZIP.']);
     try {
@@ -511,7 +570,16 @@ DOCKER;
         }
         $zip->close();
     } catch (Throwable $e) { $zip->close(); respond(422, ['error'=>$e->getMessage()]); }
-        $response = ['ok'=>true,'name'=>$name ?: 'website','download'=>'/download.php?id='.$id,'files'=>count($validatedFiles)];
+        $downloadKey = 'generated/'.$id.'/project.zip';
+    if (s3_configured()) {
+        try {
+            $zipBytes = file_get_contents($zipPath);
+            if (!is_string($zipBytes)) throw new RuntimeException('Could not read completed ZIP for upload.');
+            s3_object_request('PUT', $downloadKey, $zipBytes);
+            @unlink($zipPath); @rmdir($base);
+        } catch (Throwable $e) { respond(502, ['error'=>'ZIP created but persistent object-storage upload failed: '.$e->getMessage()]); }
+    }
+    $response = ['ok'=>true,'name'=>$name ?: 'website','download'=>'/download.php?id='.$id,'files'=>count($validatedFiles),'storage'=>s3_configured() ? 'external_object_storage' : 'local_ephemeral'];
     $githubToken = envv('NIRA_GITHUB_TOKEN');
     if ($githubToken !== '') {
         try { $response['github'] = publish_private_github_project($name ?: 'website', $validatedFiles, $githubToken); }
@@ -524,11 +592,18 @@ DOCKER;
 if ($path === '/download.php') {
     $id = (string)($_GET['id'] ?? '');
     if (!preg_match('/^[a-f0-9]{24}$/', $id)) { http_response_code(404); exit; }
+    if (s3_configured()) {
+        try {
+            $bytes = s3_object_request('GET', 'generated/'.$id.'/project.zip');
+            header('Content-Type: application/zip'); header('Content-Disposition: attachment; filename="website.zip"');
+            header('Content-Length: '.strlen($bytes)); echo $bytes; exit;
+        } catch (Throwable $e) { http_response_code(404); exit; }
+    }
     $storageRoot = rtrim(envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated'), '/');
     $dir = $storageRoot.'/'.$id;
-    $files = glob($dir.'/*.zip') ?: [];
-    if (!$files || !is_file($files[0])) { http_response_code(404); exit; }
-    header('Content-Type: application/zip'); header('Content-Disposition: attachment; filename="'.basename($files[0]).'"');
-    header('Content-Length: '.filesize($files[0])); readfile($files[0]); exit;
+    $file = $dir.'/project.zip';
+    if (!is_file($file)) { http_response_code(404); exit; }
+    header('Content-Type: application/zip'); header('Content-Disposition: attachment; filename="website.zip"');
+    header('Content-Length: '.filesize($file)); readfile($file); exit;
 }
 respond(404, ['error'=>'Not found']);
