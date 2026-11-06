@@ -379,6 +379,42 @@ function publish_private_github_project(string $projectName, array $files, strin
         'download_url'=>'https://github.com/'.$owner.'/'.$repoName.'/archive/refs/heads/'.$branch.'.zip'];
 }
 
+function build_static_preview(array $files, string $viewPath): string {
+    $layout = (string)($files['resources/views/layouts/app.blade.php'] ?? '');
+    $view = (string)($files[$viewPath] ?? '');
+    if ($view === '') return '<!doctype html><html><body><h1>Preview unavailable</h1><p>Requested view was not generated.</p></body></html>';
+    if (preg_match('/@extends\\s*\\([\\'"]([^\\'"]+)[\\'"]\\)/', $view, $m)) {
+        $view = preg_replace('/@extends\\s*\\([\\'"][^\\'"]+[\\'"]\\)\\s*/', '', $view, 1);
+    }
+    if ($layout !== '') {
+        if (preg_match('/@section\\s*\\([\\'"]content[\\'"]\\)(.*?)@endsection/s', $view, $m)) {
+            $content = $m[1];
+            $layout = preg_replace('/@yield\\s*\\([\\'"]content[\\'"](?:\\s*,\\s*[^)]*)?\\)/', $content, $layout, 1);
+        } else {
+            $layout .= $view;
+        }
+        $html = $layout;
+    } else {
+        $html = $view;
+    }
+    $css = (string)($files['resources/css/app.css'] ?? '');
+    $html = preg_replace('/<script\\b[^>]*>.*?<\\/script\\s*>/is', '', $html);
+    $html = preg_replace('/<(iframe|object|embed|base)\\b[^>]*>.*?<\\/\\1\\s*>/is', '', $html);
+    $html = preg_replace('/<(iframe|object|embed|base)\\b[^>]*\\/?\\s*>/is', '', $html);
+    $html = preg_replace('/<form\\b[^>]*>/i', '<div class="preview-form">', $html);
+    $html = preg_replace('/<\\/form\\s*>/i', '</div>', $html);
+    $html = preg_replace('/\\s+on[a-z]+\\s*=\\s*("[^"]*"|\\'[^\\']*\\'|[^\\s>]+)/i', '', $html);
+    $html = preg_replace('/\\s+(href|src)\\s*=\\s*([\\'"])\\s*javascript:[^\\'"]*\\2/i', '', $html);
+    $html = preg_replace('/@csrf|@method\\s*\\([^)]*\\)|@vite\\s*\\([^)]*\\)/', '', $html);
+    $html = preg_replace('/\\{\\{\\s*(.*?)\\s*\\}\\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
+    $html = preg_replace('/\\{!!\\s*(.*?)\\s*!!\\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
+    $html = preg_replace('/@[a-zA-Z_]+(?:\\s*\\([^)]*\\))?/', '', $html);
+    $style = '<style>body{margin:0;font-family:system-ui,sans-serif}.preview-dynamic{color:#64748b;background:#e2e8f0;border-radius:4px;padding:1px 4px}.preview-form{pointer-events:none}'.$css.'</style>';
+    if (preg_match('/<head\\b[^>]*>/i', $html)) $html = preg_replace('/<head\\b[^>]*>/i', '$0'.$style, $html, 1);
+    else $html = '<!doctype html><html><head><meta charset="utf-8">'.$style.'</head><body>'.$html.'</body></html>';
+    return substr($html, 0, 60000);
+}
+
 function ui(): never {
     header('Content-Type: text/html; charset=utf-8');
     echo <<<'HTML'
@@ -386,15 +422,17 @@ function ui(): never {
 <title>Nira AI Website Builder</title>
 <style>
 :root{color-scheme:dark;font-family:system-ui}body{margin:0;background:#0b1020;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:20px}
-main{width:min(760px,100%);background:#151d33;border:1px solid #293654;border-radius:22px;padding:28px;box-sizing:border-box}
+main{width:min(1000px,100%);background:#151d33;border:1px solid #293654;border-radius:22px;padding:28px;box-sizing:border-box}
 h1{margin:0 0 8px;font-size:clamp(26px,5vw,38px)}p{color:#b9c5dc;line-height:1.6}
 textarea,input{width:100%;box-sizing:border-box;background:#0b1328;color:#fff;border:1px solid #344464;border-radius:12px;padding:14px;font:inherit;margin:8px 0 16px}
 textarea{min-height:160px;resize:vertical}button{background:#6d7cff;color:white;border:0;border-radius:12px;padding:13px 20px;font-weight:700;font-size:16px;cursor:pointer}
 button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#cbd5e1}.small{font-size:13px;color:#92a2bf}
+#preview{display:none;margin-top:24px;border-top:1px solid #344464;padding-top:20px}#preview iframe{width:100%;height:620px;background:white;border:1px solid #344464;border-radius:12px}
+.preview-tabs{display:flex;gap:8px;margin:12px 0}.preview-tabs button{font-size:14px;padding:9px 14px}
 </style><main><h1>Nira AI Website Builder</h1><p>আপনার ওয়েবসাইটের ধরন, পেজ, ডিজাইন ও ফিচার লিখুন। Nira AI একটি প্রজেক্ট ZIP তৈরি করবে।</p>
 <label>ওয়েবসাইটের নির্দেশনা</label><textarea id="prompt" placeholder="যেমন: আধুনিক e-commerce website, product catalog, cart, admin dashboard, Bangla/English..."></textarea>
 <label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40">\n<label>Access token (যদি সার্ভারে সেট করা থাকে)</label><input id="token" type="password" autocomplete="off" placeholder="NIRA_BUILDER_TOKEN">
-<button id="go">Generate website ZIP</button><div id="status"></div><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
+<button id="go">Generate website ZIP</button><div id="status"></div><section id="preview"><h2>Static preview (safe mode)</h2><p class="small">এটি generated Blade/CSS থেকে তৈরি নিরাপদ static preview; Laravel/PHP বা generated JavaScript এখানে execute হয় না।</p><div class="preview-tabs"><button id="storeTab" type="button">Storefront</button><button id="adminTab" type="button">Admin Panel</button></div><iframe id="previewFrame" title="Website preview" sandbox=""></iframe></section><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
 b.onclick=async()=>{b.disabled=true;s.textContent='প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
@@ -411,6 +449,12 @@ if(!completed)throw Error('Builder connection ended before completion.');
 s.textContent='তৈরি হয়েছে: '+completed.files+'টি ফাইল। '+(completed.github?'Private GitHub draft প্রস্তুত।':'');
 if(completed.github?.repository_url){const p=document.createElement('p'),repo=document.createElement('a');repo.href=completed.github.repository_url;repo.target='_blank';repo.rel='noopener';repo.textContent='Private draft repository দেখুন';p.append(repo);s.append(p);
 const approve=document.createElement('button');approve.textContent='আমি অনুমোদন দিচ্ছি — Review PR তৈরি করো';approve.style.marginTop='12px';approve.onclick=async()=>{approve.disabled=true;try{const ar=await fetch('/api/approve',{method:'POST',headers:{'Content-Type':'application/json','X-Nira-Token':document.getElementById('token').value},body:JSON.stringify({owner:completed.github.owner,repo:completed.github.repo,branch:completed.github.branch})});const aj=await ar.json();if(!ar.ok)throw Error(aj.error||'Approval failed');const link=document.createElement('a');link.href=aj.pull_request_url;link.target='_blank';link.rel='noopener';link.textContent='Approved review pull request খুলুন';s.append(link);}catch(e){s.append(document.createTextNode(' অনুমোদন ব্যর্থ: '+e.message));approve.disabled=false;}};s.append(approve);
+}
+if(completed.preview?.storefront_html && completed.preview?.admin_html){
+const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');
+const store=document.getElementById('storeTab'),admin=document.getElementById('adminTab');
+const show=(which)=>{frame.srcdoc=which==='admin'?completed.preview.admin_html:completed.preview.storefront_html;store.disabled=which==='store';admin.disabled=which==='admin';};
+store.onclick=()=>show('store');admin.onclick=()=>show('admin');section.style.display='block';show('store');
 }
 if(completed.download){const a=document.createElement('a');a.href=completed.download;a.textContent=' ZIP ডাউনলোড';a.style.display='inline-block';a.style.marginTop='12px';s.append(a)}
 }catch(e){s.textContent='সমস্যা: '+e.message}finally{b.disabled=false}};
@@ -678,7 +722,11 @@ SH;
         $response['github_notice'] = 'NIRA_GITHUB_TOKEN is not configured. ZIP storage is temporary on Render Free; configure GitHub publishing for durable free storage.';
     }
     $response['approval_required'] = true;
-    $response['preview_type'] = 'source_only';
+    $response['preview_type'] = 'static_sanitized';
+    $response['preview'] = [
+        'storefront_html'=>build_static_preview($validatedFiles, 'resources/views/store/index.blade.php'),
+        'admin_html'=>build_static_preview($validatedFiles, 'resources/views/admin/dashboard.blade.php'),
+    ];
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
         progress_event('complete', $response + ['percent'=>100,'message'=>'প্রজেক্ট তৈরি হয়েছে। GitHub PR তৈরির আগে আপনার অনুমতি প্রয়োজন।']);
         exit;
