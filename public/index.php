@@ -398,12 +398,17 @@ function build_static_preview(array $files, string $viewPath): string {
         $html = $view;
     }
     $css = (string)($files['resources/css/app.css'] ?? '');
+    $css = preg_replace('/@import\\s+[^;]+;?/i', '', $css);
+    $css = preg_replace('/url\\(\\s*([\\'"]?)(?:https?:|\\/\\/|data:|javascript:)[^)]*\\)/i', 'none', $css);
+    $css = preg_replace('/expression\\s*\\([^)]*\\)/i', 'none', $css);
+    $html = preg_replace('/<link\\b[^>]*>/is', '', $html);
     $html = preg_replace('/<script\\b[^>]*>.*?<\\/script\\s*>/is', '', $html);
     $html = preg_replace('/<(iframe|object|embed|base)\\b[^>]*>.*?<\\/\\1\\s*>/is', '', $html);
     $html = preg_replace('/<(iframe|object|embed|base)\\b[^>]*\\/?\\s*>/is', '', $html);
     $html = preg_replace('/<form\\b[^>]*>/i', '<div class="preview-form">', $html);
     $html = preg_replace('/<\\/form\\s*>/i', '</div>', $html);
     $html = preg_replace('/\\s+on[a-z]+\\s*=\\s*("[^"]*"|\\x27[^\\x27]*\\x27|[^\\s>]+)/i', '', $html);
+    $html = preg_replace('/\\s+(src|srcset|poster)\\s*=\\s*(["\\x27])(?:https?:|\\/\\/|data:|javascript:)[^"\\x27]*\\2/i', '', $html);
     $html = preg_replace('/\\s+(href|src)\\s*=\\s*(["\\x27])\\s*javascript:[^"\\x27]*\\2/i', '', $html);
     $html = preg_replace('/@csrf|@method\\s*\\([^)]*\\)|@vite\\s*\\([^)]*\\)/', '', $html);
     $html = preg_replace('/\\{\\{\\s*(.*?)\\s*\\}\\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
