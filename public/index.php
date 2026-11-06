@@ -420,6 +420,16 @@ function build_static_preview(array $files, string $viewPath): string {
     return substr($html, 0, 60000);
 }
 
+function save_preview_snapshot(string $id, array $files): void {
+    if (!preg_match('/^[a-f0-9]{24}$/', $id)) return;
+    $root = dirname(rtrim(envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated'), '/')).'/previews';
+    if (!is_dir($root) && !mkdir($root, 0750, true) && !is_dir($root)) return;
+    $store = build_static_preview($files, 'resources/views/store/index.blade.php');
+    $admin = build_static_preview($files, 'resources/views/admin/dashboard.blade.php');
+    @file_put_contents($root.'/'.$id.'-storefront.html', $store, LOCK_EX);
+    @file_put_contents($root.'/'.$id.'-admin.html', $admin, LOCK_EX);
+}
+
 function ui(): never {
     header('Content-Type: text/html; charset=utf-8');
     echo <<<'HTML'
@@ -562,6 +572,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     ];
     $allGeneratedFiles = [];
     $apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey);
+    $previewId = bin2hex(random_bytes(12));
     $batchTotal = count($generationBatches);
     foreach ($generationBatches as $batchIndex => $batch) {
         progress_event('progress', ['stage'=>$batch['name'],'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)(($batchIndex/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>'ব্যাচ '.$batchIndex+1 .'/'.$batchTotal.' তৈরি হচ্ছে']);
@@ -629,7 +640,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         if (count($batchResult['files']) < 1) {
             respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
         }
-        progress_event('progress', ['stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
+        save_preview_snapshot($previewId, $allGeneratedFiles);
+        progress_event('progress', ['stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,'preview_url'=>'/preview?id='.$previewId.'&view=storefront','preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
     }
     $result = ['files'=>[]];
     foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
@@ -735,6 +747,9 @@ SH;
     }
     $response['approval_required'] = true;
     $response['preview_type'] = 'static_sanitized';
+    $response['preview_id'] = $previewId;
+    $response['preview_url'] = '/preview?id='.$previewId.'&view=storefront';
+    $response['admin_preview_url'] = '/preview?id='.$previewId.'&view=admin';
     $response['preview'] = [
         'storefront_html'=>build_static_preview($validatedFiles, 'resources/views/store/index.blade.php'),
         'admin_html'=>build_static_preview($validatedFiles, 'resources/views/admin/dashboard.blade.php'),
@@ -862,6 +877,20 @@ if ($path === '/api/approve' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         ]);
         respond(200, ['ok'=>true,'pull_request_url'=>$pr['html_url'] ?? null]);
     } catch (Throwable $e) { respond(502, ['error'=>'Could not create the approved review pull request: '.$e->getMessage()]); }
+}
+if ($path === '/preview') {
+    $id = (string)($_GET['id'] ?? '');
+    $view = (string)($_GET['view'] ?? 'storefront');
+    if (!preg_match('/^[a-f0-9]{24}$/', $id) || !in_array($view, ['storefront','admin'], true)) {
+        http_response_code(404); exit;
+    }
+    $root = dirname(rtrim(envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated'), '/')).'/previews';
+    $file = $root.'/'.$id.'-'.$view.'.html';
+    if (!is_file($file)) { http_response_code(404); exit; }
+    header('Content-Type: text/html; charset=utf-8');
+    header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; form-action 'none'; base-uri 'none'; frame-ancestors 'self'");
+    header('X-Content-Type-Options: nosniff');
+    readfile($file); exit;
 }
 if ($path === '/download.php') {
     $id = (string)($_GET['id'] ?? '');
