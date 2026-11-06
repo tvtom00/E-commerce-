@@ -340,7 +340,8 @@ function publish_private_github_project(string $projectName, array $files, strin
         'body'=>"Nira generated this customer-specific Laravel e-commerce project. Review the source and CI results before merging or deploying.\n\nNo generated code was executed by the builder.",
     ]);
     return ['repository_url'=>$repo['html_url'] ?? ('https://github.com/'.$owner.'/'.$repoName),
-        'pull_request_url'=>$pr['html_url'] ?? null,'branch'=>$branch];
+        'pull_request_url'=>$pr['html_url'] ?? null,'branch'=>$branch,
+        'download_url'=>'https://github.com/'.$owner.'/'.$repoName.'/archive/refs/heads/'.$branch.'.zip'];
 }
 
 function ui(): never {
@@ -582,10 +583,20 @@ DOCKER;
     $response = ['ok'=>true,'name'=>$name ?: 'website','download'=>'/download.php?id='.$id,'files'=>count($validatedFiles),'storage'=>s3_configured() ? 'external_object_storage' : 'local_ephemeral'];
     $githubToken = envv('NIRA_GITHUB_TOKEN');
     if ($githubToken !== '') {
-        try { $response['github'] = publish_private_github_project($name ?: 'website', $validatedFiles, $githubToken); }
-        catch (Throwable $e) { $response['github_error'] = $e->getMessage(); }
+        try {
+            $response['github'] = publish_private_github_project($name ?: 'website', $validatedFiles, $githubToken);
+            // The private GitHub repository is the durable, no-extra-storage archive.
+            // Its branch ZIP contains the complete generated source and survives Render restarts.
+            $response['download'] = $response['github']['download_url'];
+            $response['storage'] = 'private_github_repository';
+            @unlink($zipPath);
+            @rmdir($base);
+        } catch (Throwable $e) {
+            $response['github_error'] = $e->getMessage();
+            $response['github_notice'] = 'GitHub archive could not be confirmed; the local ZIP is temporary and may disappear after a restart or redeploy.';
+        }
     } else {
-        $response['github_notice'] = 'Private GitHub publishing is not configured; ZIP output is available.';
+        $response['github_notice'] = 'NIRA_GITHUB_TOKEN is not configured. ZIP storage is temporary on Render Free; configure GitHub publishing for durable free storage.';
     }
     respond(200, $response);
 }
