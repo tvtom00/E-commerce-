@@ -606,19 +606,28 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             'contents'=>[['parts'=>[['text'=>$batchText]]]],
             'generationConfig'=>['responseMimeType'=>'application/json','maxOutputTokens'=>22000]
         ];
-        $ch = curl_init($apiUrl);
-        curl_setopt_array($ch, [
-            CURLOPT_POST=>true,
-            CURLOPT_HTTPHEADER=>['Content-Type: application/json'],
-            CURLOPT_POSTFIELDS=>json_encode($payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
-            CURLOPT_RETURNTRANSFER=>true,
-            CURLOPT_CONNECTTIMEOUT=>15,
-            CURLOPT_TIMEOUT=>150
-        ]);
-        $body = curl_exec($ch);
-        $err = curl_error($ch);
-        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        // Retry transient Gemini capacity/rate-limit failures with bounded backoff.
+        $body = false;
+        $err = '';
+        $code = 0;
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $ch = curl_init($apiUrl);
+            curl_setopt_array($ch, [
+                CURLOPT_POST=>true,
+                CURLOPT_HTTPHEADER=>['Content-Type: application/json'],
+                CURLOPT_POSTFIELDS=>json_encode($payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
+                CURLOPT_RETURNTRANSFER=>true,
+                CURLOPT_CONNECTTIMEOUT=>15,
+                CURLOPT_TIMEOUT=>150
+            ]);
+            $body = curl_exec($ch);
+            $err = curl_error($ch);
+            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            $retryable = ($body === false) || in_array($code, [429, 500, 502, 503, 504], true);
+            if (!$retryable || $attempt === 3) break;
+            sleep($attempt === 1 ? 2 : 5);
+        }
         if ($body === false) respond(502, ['error'=>'AI request failed during '.$batch['name'].' generation: '.$err]);
         $answer = json_decode($body, true);
         if ($code < 200 || $code >= 300) {
