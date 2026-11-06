@@ -301,6 +301,28 @@ function github_api(string $method, string $path, string $token, ?array $payload
     }
     return $data;
 }
+function github_token_is_valid(): bool {
+    $token = envv('NIRA_GITHUB_TOKEN');
+    if ($token === '') return false;
+    $ch = curl_init('https://api.github.com/user');
+    curl_setopt_array($ch, [
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/vnd.github+json',
+            'Authorization: Bearer '.$token,
+            'X-GitHub-Api-Version: 2022-11-28',
+            'User-Agent: Nira-Website-Builder',
+        ],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_TIMEOUT => 12,
+    ]);
+    $body = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if (!is_string($body) || $status !== 200) return false;
+    $data = json_decode($body, true);
+    return is_array($data) && isset($data['login']);
+}
 function publish_private_github_project(string $projectName, array $files, string $token): array {
     $baseName = strtolower(trim(preg_replace('/[^a-zA-Z0-9-]+/', '-', $projectName), '-'));
     if ($baseName === '') $baseName = 'nira-store';
@@ -383,6 +405,7 @@ if ($path === '/health') {
         'service'=>'nira-website-builder',
         'gemini_configured'=>envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) !== '',
         'github_publishing_configured'=>envv('NIRA_GITHUB_TOKEN') !== '',
+        'github_token_valid'=>github_token_is_valid(),
         'storage_writable'=>$storageReady,
         'persistent_storage_configured'=>$persistentPath,
     ];
