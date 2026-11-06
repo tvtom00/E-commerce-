@@ -28,6 +28,13 @@ function envv(string $key, string $default = ''): string {
     $v = getenv($key);
     return $v === false ? $default : trim($v);
 }
+
+/** Long Gemini/GitHub operations can exceed PHP's default 30-second execution limit. */
+function allow_long_execution(): void {
+    if (function_exists('set_time_limit')) @set_time_limit(0);
+    @ini_set('max_execution_time', '0');
+}
+
 function clean_name(string $name): string {
     $name = trim(str_replace('\\', '/', $name));
     if ($name === '' || str_starts_with($name, '/') || preg_match('/(^|\/)\.\.(\/|$)/', $name)) {
@@ -519,6 +526,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     if ($expected === '') respond(503, ['error'=>'Builder API is disabled until NIRA_BUILDER_TOKEN is configured.']);
     $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
     if (!hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
+    allow_long_execution();
     $GLOBALS['NIRA_SSE_MODE'] = (($_GET['stream'] ?? '') === '1');
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
         header('Content-Type: text/event-stream; charset=utf-8');
@@ -773,6 +781,7 @@ if ($path === '/api/revise' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     $expected = envv('NIRA_BUILDER_TOKEN');
     $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
     if ($expected === '' || !hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
+    allow_long_execution();
     $raw = file_get_contents('php://input', false, null, 0, 10000);
     $input = is_string($raw) ? json_decode($raw, true) : null;
     $owner = is_array($input) ? (string)($input['owner'] ?? '') : '';
@@ -863,6 +872,7 @@ if ($path === '/api/approve' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     $expected = envv('NIRA_BUILDER_TOKEN');
     $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
     if ($expected === '' || !hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
+    allow_long_execution();
     $raw = file_get_contents('php://input', false, null, 0, 4000);
     $input = is_string($raw) ? json_decode($raw, true) : null;
     $owner = is_array($input) ? (string)($input['owner'] ?? '') : '';
