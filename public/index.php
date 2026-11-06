@@ -383,13 +383,14 @@ function build_static_preview(array $files, string $viewPath): string {
     $layout = (string)($files['resources/views/layouts/app.blade.php'] ?? '');
     $view = (string)($files[$viewPath] ?? '');
     if ($view === '') return '<!doctype html><html><body><h1>Preview unavailable</h1><p>Requested view was not generated.</p></body></html>';
-    if (preg_match('/@extends\\s*\\(["\\x27]([^"\\x27]+)["\\x27]\\)/', $view, $m)) {
-        $view = preg_replace('/@extends\\s*\\(["\\x27][^"\\x27]+["\\x27]\\)\\s*/', '', $view, 1);
+
+    if (preg_match('/@extends\s*\(["\x27]([^"\x27]+)["\x27]\)/', $view)) {
+        $view = preg_replace('/@extends\s*\(["\x27][^"\x27]+["\x27]\)\s*/', '', $view, 1);
     }
     if ($layout !== '') {
-        if (preg_match('/@section\\s*\\(["\\x27]content["\\x27]\\)(.*?)@endsection/s', $view, $m)) {
+        if (preg_match('/@section\s*\(["\x27]content["\x27]\)(.*?)@endsection/s', $view, $m)) {
             $content = $m[1];
-            $layout = preg_replace('/@yield\\s*\\(["\\x27]content["\\x27](?:\\s*,\\s*[^)]*)?\\)/', $content, $layout, 1);
+            $layout = preg_replace('/@yield\s*\(["\x27]content["\x27](?:\s*,\s*[^)]*)?\)/', $content, $layout, 1);
         } else {
             $layout .= $view;
         }
@@ -397,26 +398,34 @@ function build_static_preview(array $files, string $viewPath): string {
     } else {
         $html = $view;
     }
+
     $css = (string)($files['resources/css/app.css'] ?? '');
-    $css = preg_replace('/@import\\s+[^;]+;?/i', '', $css);
-    $css = preg_replace('/url\\(\\s*(?:"|\\x27)?(?:https?:|\\/\\/|data:|javascript:)[^)]*\\)/i', 'none', $css);
-    $css = preg_replace('/expression\\s*\\([^)]*\\)/i', 'none', $css);
-    $html = preg_replace('/<link\\b[^>]*>/is', '', $html);
-    $html = preg_replace('/<script\\b[^>]*>.*?<\\/script\\s*>/is', '', $html);
-    $html = preg_replace('/<(iframe|object|embed|base)\\b[^>]*>.*?<\\/\\1\\s*>/is', '', $html);
-    $html = preg_replace('/<(iframe|object|embed|base)\\b[^>]*\\/?\\s*>/is', '', $html);
-    $html = preg_replace('/<form\\b[^>]*>/i', '<div class="preview-form">', $html);
-    $html = preg_replace('/<\\/form\\s*>/i', '</div>', $html);
-    $html = preg_replace('/\\s+on[a-z]+\\s*=\\s*("[^"]*"|\\x27[^\\x27]*\\x27|[^\\s>]+)/i', '', $html);
-    $html = preg_replace('/\\s+(src|srcset|poster)\\s*=\\s*(["\\x27])(?:https?:|\\/\\/|data:|javascript:)[^"\\x27]*\\2/i', '', $html);
-    $html = preg_replace('/\\s+(href|src)\\s*=\\s*(["\\x27])\\s*javascript:[^"\\x27]*\\2/i', '', $html);
-    $html = preg_replace('/@csrf|@method\\s*\\([^)]*\\)|@vite\\s*\\([^)]*\\)/', '', $html);
-    $html = preg_replace('/\\{\\{\\s*(.*?)\\s*\\}\\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
-    $html = preg_replace('/\\{!!\\s*(.*?)\\s*!!\\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
-    $html = preg_replace('/@[a-zA-Z_]+(?:\\s*\\([^)]*\\))?/', '', $html);
+    $css = preg_replace('/@import\s+[^;]+;?/i', '', $css);
+    $css = preg_replace('/url\(\s*(?:"|\x27)?(?:https?:|\/\/|data:|javascript:)[^)]*\)/i', 'none', $css);
+    $css = preg_replace('/expression\s*\([^)]*\)/i', 'none', $css);
+
+    $html = preg_replace('/<link\b[^>]*>/is', '', $html);
+    $html = preg_replace('/<script\b[^>]*>.*?<\/script\s*>/is', '', $html);
+    $html = preg_replace('/<(iframe|object|embed|base)\b[^>]*>.*?<\/\1\s*>/is', '', $html);
+    $html = preg_replace('/<(iframe|object|embed|base)\b[^>]*\/?\s*>/is', '', $html);
+    $html = preg_replace('/<meta\b[^>]*http-equiv[^>]*>/is', '', $html);
+    $html = preg_replace('/<form\b[^>]*>/i', '<div class="preview-form">', $html);
+    $html = preg_replace('/<\/form\s*>/i', '</div>', $html);
+    $html = preg_replace('/\s+on[a-z]+\s*=\s*("[^"]*"|\x27[^\x27]*\x27|[^\s>]+)/i', '', $html);
+    $html = preg_replace('/\s+(src|srcset|poster)\s*=\s*(["\x27])(?:https?:|\/\/|data:|javascript:)[^"\x27]*\2/i', '', $html);
+    $html = preg_replace('/\s+(href|src)\s*=\s*(["\x27])\s*javascript:[^"\x27]*\2/i', '', $html);
+    $html = preg_replace('/\s+srcdoc\s*=\s*("[^"]*"|\x27[^\x27]*\x27)/i', '', $html);
+    $html = preg_replace('/@csrf|@method\s*\([^)]*\)|@vite\s*\([^)]*\)/', '', $html);
+    $html = preg_replace('/\{\{\s*(.*?)\s*\}\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
+    $html = preg_replace('/\{!!\s*(.*?)\s*!!\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
+    $html = preg_replace('/@[a-zA-Z_]+(?:\s*\([^)]*\))?/', '', $html);
+
     $style = '<style>body{margin:0;font-family:system-ui,sans-serif}.preview-dynamic{color:#64748b;background:#e2e8f0;border-radius:4px;padding:1px 4px}.preview-form{pointer-events:none}'.$css.'</style>';
-    if (preg_match('/<head\\b[^>]*>/i', $html)) $html = preg_replace('/<head\\b[^>]*>/i', '$0'.$style, $html, 1);
-    else $html = '<!doctype html><html><head><meta charset="utf-8">'.$style.'</head><body>'.$html.'</body></html>';
+    if (preg_match('/<head\b[^>]*>/i', $html)) {
+        $html = preg_replace('/<head\b[^>]*>/i', '$0'.$style, $html, 1);
+    } else {
+        $html = '<!doctype html><html><head><meta charset="utf-8">'.$style.'</head><body>'.$html.'</body></html>';
+    }
     return substr($html, 0, 60000);
 }
 
