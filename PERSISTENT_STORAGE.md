@@ -13,7 +13,7 @@ For durable project source without a paid disk:
   `repo` and `workflow`; for fine-grained tokens, grant repository contents and
   workflows write access).
 - Configure `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the **Builder Render service**.
-  Optionally set `GEMINI_MODEL` there; otherwise the Builder uses its code default.
+  Optionally set `GEMINI_MODEL` there; otherwise the Builder uses `gemini-3.6-flash`, matching Nira's configured model family. Gemini 2.5 access may be restricted for projects without prior active usage.
 - Set the same `NIRA_BUILDER_TOKEN` value on both the Nira service and Builder service.
 - Keep the Nira service's `NIRA_ECOMMERCE_BUILDER_URL` pointed at the Builder URL.
 
