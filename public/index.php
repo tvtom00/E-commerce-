@@ -398,7 +398,7 @@ button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#c
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
 b.onclick=async()=>{b.disabled=true;s.textContent='প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
-const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value})});
+const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value})});
 if(!r.ok && !r.body)throw Error('Generation failed');
 const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
 while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
@@ -444,11 +444,13 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     if ($expected === '') respond(503, ['error'=>'Builder API is disabled until NIRA_BUILDER_TOKEN is configured.']);
     $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
     if (!hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
-    $GLOBALS['NIRA_SSE_MODE'] = true;
-    header('Content-Type: text/event-stream; charset=utf-8');
-    header('Cache-Control: no-cache, no-transform');
-    header('X-Accel-Buffering: no');
-    progress_event('progress', ['stage'=>'request_received','percent'=>2,'message'=>'অনুরোধ যাচাই করা হচ্ছে']);
+    $GLOBALS['NIRA_SSE_MODE'] = (($_GET['stream'] ?? '') === '1');
+    if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
+        header('Content-Type: text/event-stream; charset=utf-8');
+        header('Cache-Control: no-cache, no-transform');
+        header('X-Accel-Buffering: no');
+        progress_event('progress', ['stage'=>'request_received','percent'=>2,'message'=>'অনুরোধ যাচাই করা হচ্ছে']);
+    }
     $raw = file_get_contents('php://input', false, null, 0, MAX_REQUEST_BYTES + 1);
     if (strlen($raw) > MAX_REQUEST_BYTES) respond(413, ['error'=>'Request too large.']);
     $input = json_decode($raw ?: '', true);
@@ -677,8 +679,11 @@ SH;
     }
     $response['approval_required'] = true;
     $response['preview_type'] = 'source_only';
-    progress_event('complete', $response + ['percent'=>100,'message'=>'প্রজেক্ট তৈরি হয়েছে। GitHub PR তৈরির আগে আপনার অনুমতি প্রয়োজন।']);
-    exit;
+    if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
+        progress_event('complete', $response + ['percent'=>100,'message'=>'প্রজেক্ট তৈরি হয়েছে। GitHub PR তৈরির আগে আপনার অনুমতি প্রয়োজন।']);
+        exit;
+    }
+    respond(200, $response);
 }
 if ($path === '/api/approve' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     $expected = envv('NIRA_BUILDER_TOKEN');
