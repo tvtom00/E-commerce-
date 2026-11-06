@@ -446,7 +446,7 @@ if(!r.ok && !r.body)throw Error('Generation failed');
 const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
 while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
 for(const block of blocks){const ev=(block.match(/^event: (.+)$/m)||[])[1],data=(block.match(/^data: (.+)$/m)||[])[1];if(!data)continue;const j=JSON.parse(data);
-if(ev==='progress'){s.textContent=j.message+'\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0); }
+if(ev==='progress'){s.textContent=j.message+'\\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
 if(ev==='error')throw Error(j.error||'Generation failed');
 if(ev==='complete')completed=j;
 }}
@@ -629,7 +629,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         if (count($batchResult['files']) < 1) {
             respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
         }
-        progress_event('progress', ['stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন']);
+        progress_event('progress', ['stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
     }
     $result = ['files'=>[]];
     foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
