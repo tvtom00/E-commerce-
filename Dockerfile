@@ -12,7 +12,8 @@ RUN sed -ri 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-availabl
 WORKDIR /var/www/html
 COPY public/ ./public/
 COPY docker/entrypoint.sh /usr/local/bin/render-entrypoint
-RUN chmod +x /usr/local/bin/render-entrypoint \
+RUN php -l /var/www/html/public/index.php \
+    && chmod +x /usr/local/bin/render-entrypoint \
     && mkdir -p storage/generated storage/tmp \
     && chown -R www-data:www-data storage
 
