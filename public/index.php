@@ -383,13 +383,13 @@ function build_static_preview(array $files, string $viewPath): string {
     $layout = (string)($files['resources/views/layouts/app.blade.php'] ?? '');
     $view = (string)($files[$viewPath] ?? '');
     if ($view === '') return '<!doctype html><html><body><h1>Preview unavailable</h1><p>Requested view was not generated.</p></body></html>';
-    if (preg_match('/@extends\\s*\\([\\'"]([^\\'"]+)[\\'"]\\)/', $view, $m)) {
-        $view = preg_replace('/@extends\\s*\\([\\'"][^\\'"]+[\\'"]\\)\\s*/', '', $view, 1);
+    if (preg_match('/@extends\\s*\\(["\\x27]([^"\\x27]+)["\\x27]\\)/', $view, $m)) {
+        $view = preg_replace('/@extends\\s*\\(["\\x27][^"\\x27]+["\\x27]\\)\\s*/', '', $view, 1);
     }
     if ($layout !== '') {
-        if (preg_match('/@section\\s*\\([\\'"]content[\\'"]\\)(.*?)@endsection/s', $view, $m)) {
+        if (preg_match('/@section\\s*\\(["\\x27]content["\\x27]\\)(.*?)@endsection/s', $view, $m)) {
             $content = $m[1];
-            $layout = preg_replace('/@yield\\s*\\([\\'"]content[\\'"](?:\\s*,\\s*[^)]*)?\\)/', $content, $layout, 1);
+            $layout = preg_replace('/@yield\\s*\\(["\\x27]content["\\x27](?:\\s*,\\s*[^)]*)?\\)/', $content, $layout, 1);
         } else {
             $layout .= $view;
         }
@@ -403,8 +403,8 @@ function build_static_preview(array $files, string $viewPath): string {
     $html = preg_replace('/<(iframe|object|embed|base)\\b[^>]*\\/?\\s*>/is', '', $html);
     $html = preg_replace('/<form\\b[^>]*>/i', '<div class="preview-form">', $html);
     $html = preg_replace('/<\\/form\\s*>/i', '</div>', $html);
-    $html = preg_replace('/\\s+on[a-z]+\\s*=\\s*("[^"]*"|\\'[^\\']*\\'|[^\\s>]+)/i', '', $html);
-    $html = preg_replace('/\\s+(href|src)\\s*=\\s*([\\'"])\\s*javascript:[^\\'"]*\\2/i', '', $html);
+    $html = preg_replace('/\\s+on[a-z]+\\s*=\\s*("[^"]*"|\\x27[^\\x27]*\\x27|[^\\s>]+)/i', '', $html);
+    $html = preg_replace('/\\s+(href|src)\\s*=\\s*(["\\x27])\\s*javascript:[^"\\x27]*\\2/i', '', $html);
     $html = preg_replace('/@csrf|@method\\s*\\([^)]*\\)|@vite\\s*\\([^)]*\\)/', '', $html);
     $html = preg_replace('/\\{\\{\\s*(.*?)\\s*\\}\\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
     $html = preg_replace('/\\{!!\\s*(.*?)\\s*!!\\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
