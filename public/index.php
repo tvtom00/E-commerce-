@@ -733,6 +733,96 @@ SH;
     }
     respond(200, $response);
 }
+if ($path === '/api/revise' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    $expected = envv('NIRA_BUILDER_TOKEN');
+    $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
+    if ($expected === '' || !hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
+    $raw = file_get_contents('php://input', false, null, 0, 10000);
+    $input = is_string($raw) ? json_decode($raw, true) : null;
+    $owner = is_array($input) ? (string)($input['owner'] ?? '') : '';
+    $repoName = is_array($input) ? (string)($input['repo'] ?? '') : '';
+    $branch = is_array($input) ? (string)($input['branch'] ?? '') : '';
+    $instruction = trim((string)($input['instruction'] ?? ''));
+    if (!preg_match('/^[A-Za-z0-9-]{1,39}$/', $owner) || !preg_match('/^[A-Za-z0-9._-]{1,100}$/', $repoName)
+        || $branch !== 'nira-generated' || strlen($instruction) < 5 || strlen($instruction) > 2500) {
+        respond(422, ['error'=>'Provide a valid private draft repository, nira-generated branch and a 5–2500 character design instruction.']);
+    }
+    $token = envv('NIRA_GITHUB_TOKEN');
+    $apiKey = envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY'));
+    if ($token === '' || $apiKey === '') respond(503, ['error'=>'GitHub and Gemini server configuration is required for revisions.']);
+    try {
+        $repoData = github_api('GET', '/repos/'.$owner.'/'.$repoName, $token);
+        if (empty($repoData['private'])) respond(403, ['error'=>'Only private Nira draft repositories can be revised.']);
+        $ref = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/git/ref/heads/'.rawurlencode($branch), $token);
+        $baseSha = (string)($ref['object']['sha'] ?? '');
+        if ($baseSha === '') respond(404, ['error'=>'Draft branch was not found.']);
+        $commitData = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/git/commits/'.$baseSha, $token);
+        $treeData = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/git/trees/'.$commitData['tree']['sha'].'?recursive=1', $token);
+        $sourceFiles = [];
+        $allowed = static function(string $p): bool {
+            return (str_starts_with($p, 'resources/views/') && str_ends_with($p, '.blade.php'))
+                || in_array($p, ['resources/css/app.css','resources/js/app.js'], true);
+        };
+        foreach (($treeData['tree'] ?? []) as $item) {
+            $p = (string)($item['path'] ?? '');
+            if (($item['type'] ?? '') !== 'blob' || !$allowed($p)) continue;
+            if (count($sourceFiles) >= 35) break;
+            $blob = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/git/blobs/'.$item['sha'], $token);
+            if (($blob['encoding'] ?? '') !== 'base64' || !isset($blob['content'])) continue;
+            $content = base64_decode((string)$blob['content'], true);
+            if (!is_string($content) || strlen($content) > 90000) continue;
+            $sourceFiles[$p] = $content;
+            if (array_sum(array_map('strlen', $sourceFiles)) > 850000) respond(413, ['error'=>'Preview-edit source set exceeds the safe 850 KB context limit.']);
+        }
+        if (!isset($sourceFiles['resources/views/store/index.blade.php']) || !isset($sourceFiles['resources/views/admin/dashboard.blade.php'])) {
+            respond(422, ['error'=>'Draft is missing the Storefront or Admin dashboard view needed for preview.']);
+        }
+        progress_event('progress', ['stage'=>'revision_read','percent'=>10,'message'=>'Draft source পড়া হয়েছে','files_created'=>count($sourceFiles)]);
+        $model = envv('GEMINI_MODEL', 'gemini-2.5-flash');
+        $prompt = "You are revising an existing Laravel e-commerce UI. Apply the user's requested visual/content change consistently. Return ONLY JSON: {\\"files\\":[{\\"path\\":\\"existing relative path\\",\\"content\\":\\"complete updated file content\\"}]}. You may edit ONLY the supplied existing Blade views, resources/css/app.css, and resources/js/app.js. Never add files, change routes/controllers/database/auth/payment logic, add external scripts, invent secrets, or remove unrelated features. Return only files that actually need changes. Keep responsive accessibility and Laravel Blade syntax intact. USER INSTRUCTION:\\n".$instruction."\\nEXISTING FILES JSON:\\n".json_encode($sourceFiles, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $ch = curl_init('https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey));
+        curl_setopt_array($ch, [CURLOPT_POST=>true,CURLOPT_HTTPHEADER=>['Content-Type: application/json'],CURLOPT_POSTFIELDS=>json_encode([
+            'contents'=>[['parts'=>[['text'=>$prompt]]]],
+            'generationConfig'=>['responseMimeType'=>'application/json','temperature'=>0.2,'maxOutputTokens'=>12000]
+        ], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>15,CURLOPT_TIMEOUT=>150]);
+        $body = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = curl_error($ch); curl_close($ch);
+        if (!is_string($body) || $code < 200 || $code >= 300) throw new RuntimeException('Gemini revision failed (HTTP '.$code.'). '.($err ?: ''));
+        $answer = json_decode($body, true);
+        $text = (string)($answer['candidates'][0]['content']['parts'][0]['text'] ?? '');
+        $changes = json_decode($text, true);
+        if (!is_array($changes) || !isset($changes['files']) || !is_array($changes['files']) || count($changes['files']) < 1) {
+            throw new RuntimeException('Gemini returned no valid changed files.');
+        }
+        $treeItems = [];
+        $changedPaths = [];
+        foreach ($changes['files'] as $file) {
+            if (!is_array($file) || !isset($file['path'],$file['content']) || !is_string($file['path']) || !is_string($file['content'])) {
+                throw new RuntimeException('Malformed revision file.');
+            }
+            $p = clean_name($file['path']);
+            if (!$allowed($p) || !array_key_exists($p, $sourceFiles)) throw new RuntimeException('Revision attempted to modify a disallowed or unknown path: '.$p);
+            if (strlen($file['content']) > 90000 || preg_match('/(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{30,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/', $file['content'])) {
+                throw new RuntimeException('Revision contains an oversized file or possible secret.');
+            }
+            $blob = github_api('POST', '/repos/'.$owner.'/'.$repoName.'/git/blobs', $token, ['content'=>$file['content'],'encoding'=>'utf-8']);
+            $treeItems[] = ['path'=>$p,'mode'=>'100644','type'=>'blob','sha'=>$blob['sha']];
+            $sourceFiles[$p] = $file['content'];
+            $changedPaths[] = $p;
+        }
+        $tree = github_api('POST', '/repos/'.$owner.'/'.$repoName.'/git/trees', $token, ['base_tree'=>$commitData['tree']['sha'],'tree'=>$treeItems]);
+        $newCommit = github_api('POST', '/repos/'.$owner.'/'.$repoName.'/git/commits', $token, ['message'=>'Apply approved Nira UI revision','tree'=>$tree['sha'],'parents'=>[$baseSha]]);
+        github_api('PATCH', '/repos/'.$owner.'/'.$repoName.'/git/refs/heads/'.rawurlencode($branch), $token, ['sha'=>$newCommit['sha'],'force'=>false]);
+        respond(200, ['ok'=>true,'changed_files'=>$changedPaths,'commit'=>$newCommit['sha'],
+            'repository_url'=>$repoData['html_url'] ?? ('https://github.com/'.$owner.'/'.$repoName),
+            'preview'=>[
+                'storefront_html'=>build_static_preview($sourceFiles,'resources/views/store/index.blade.php'),
+                'admin_html'=>build_static_preview($sourceFiles,'resources/views/admin/dashboard.blade.php')
+            ],
+            'note'=>'Revision committed to the private draft branch only. No merge or deployment was performed.']);
+    } catch (Throwable $e) {
+        respond(502, ['error'=>'Could not revise the private draft: '.$e->getMessage()]);
+    }
+}
 if ($path === '/api/approve' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     $expected = envv('NIRA_BUILDER_TOKEN');
     $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
