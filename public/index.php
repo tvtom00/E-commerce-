@@ -828,7 +828,7 @@ if ($path === '/api/revise' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $ch = curl_init('https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey));
         curl_setopt_array($ch, [CURLOPT_POST=>true,CURLOPT_HTTPHEADER=>['Content-Type: application/json'],CURLOPT_POSTFIELDS=>json_encode([
             'contents'=>[['parts'=>[['text'=>$prompt]]]],
-            'generationConfig'=>['responseMimeType'=>'application/json','temperature'=>0.2,'maxOutputTokens'=>12000]
+            'generationConfig'=>['responseMimeType'=>'application/json','maxOutputTokens'=>12000]
         ], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>15,CURLOPT_TIMEOUT=>150]);
         $body = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = curl_error($ch); curl_close($ch);
         if (!is_string($body) || $code < 200 || $code >= 300) throw new RuntimeException('Gemini revision failed (HTTP '.$code.'). '.($err ?: ''));
