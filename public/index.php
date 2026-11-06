@@ -399,7 +399,7 @@ function build_static_preview(array $files, string $viewPath): string {
     }
     $css = (string)($files['resources/css/app.css'] ?? '');
     $css = preg_replace('/@import\\s+[^;]+;?/i', '', $css);
-    $css = preg_replace('/url\\(\\s*([\\'"]?)(?:https?:|\\/\\/|data:|javascript:)[^)]*\\)/i', 'none', $css);
+    $css = preg_replace('/url\\(\\s*(?:"|\\x27)?(?:https?:|\\/\\/|data:|javascript:)[^)]*\\)/i', 'none', $css);
     $css = preg_replace('/expression\\s*\\([^)]*\\)/i', 'none', $css);
     $html = preg_replace('/<link\\b[^>]*>/is', '', $html);
     $html = preg_replace('/<script\\b[^>]*>.*?<\\/script\\s*>/is', '', $html);
