@@ -5,11 +5,23 @@ const MAX_REQUEST_BYTES = 12000;
 const MAX_OUTPUT_FILES = 100;
 const MAX_FILE_BYTES = 120000;
 const MAX_TOTAL_BYTES = 3000000;
+$GLOBALS['NIRA_SSE_MODE'] = false;
+
+function progress_event(string $event, array $data): void {
+    if (empty($GLOBALS['NIRA_SSE_MODE'])) return;
+    echo 'event: '.$event."\n".'data: '.json_encode($data, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n\n";
+    if (function_exists('ob_flush')) @ob_flush();
+    flush();
+}
 
 function respond(int $status, array $data): never {
     http_response_code($status);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
+        progress_event('error', ['status'=>$status] + $data);
+    } else {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
     exit;
 }
 function envv(string $key, string $default = ''): string {
@@ -362,13 +374,8 @@ function publish_private_github_project(string $projectName, array $files, strin
     github_api('POST', '/repos/'.$owner.'/'.$repoName.'/git/refs', $token, [
         'ref'=>'refs/heads/'.$branch,'sha'=>$commit['sha'],
     ]);
-    $pr = github_api('POST', '/repos/'.$owner.'/'.$repoName.'/pulls', $token, [
-        'title'=>'Review generated Laravel e-commerce store',
-        'head'=>$branch,'base'=>$default,
-        'body'=>"Nira generated this customer-specific Laravel e-commerce project. Review the source and CI results before merging or deploying.\n\nNo generated code was executed by the builder.",
-    ]);
     return ['repository_url'=>$repo['html_url'] ?? ('https://github.com/'.$owner.'/'.$repoName),
-        'pull_request_url'=>$pr['html_url'] ?? null,'branch'=>$branch,
+        'owner'=>$owner,'repo'=>$repoName,'branch'=>$branch,'approval_required'=>true,
         'download_url'=>'https://github.com/'.$owner.'/'.$repoName.'/archive/refs/heads/'.$branch.'.zip'];
 }
 
@@ -390,12 +397,22 @@ button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#c
 <button id="go">Generate website ZIP</button><div id="status"></div><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
-b.onclick=async()=>{b.disabled=true;s.textContent='প্রজেক্ট তৈরি হচ্ছে...';try{
+b.onclick=async()=>{b.disabled=true;s.textContent='প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
 const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value})});
-const j=await r.json();if(!r.ok)throw Error(j.error||'Generation failed');
-s.innerHTML='';const a=document.createElement('a');a.href=j.download;a.textContent='Download '+j.name+'.zip';a.style='display:inline-block;margin-top:12px;color:#aab7ff;font-weight:bold';s.append('ওয়েবসাইট ZIP প্রস্তুত: ',a);
-if(j.github?.repository_url){const p=document.createElement('p');const repo=document.createElement('a');repo.href=j.github.repository_url;repo.target='_blank';repo.rel='noopener';repo.textContent='Open private GitHub repository';p.append(repo);if(j.github.pull_request_url){p.append(' · ');const pr=document.createElement('a');pr.href=j.github.pull_request_url;pr.target='_blank';pr.rel='noopener';pr.textContent='Review pull request';p.append(pr)}s.append(p)}
-if(j.github_error){const p=document.createElement('p');p.textContent='GitHub publishing issue: '+j.github_error;s.append(p)}else if(j.github_notice){const p=document.createElement('p');p.textContent=j.github_notice;s.append(p)}
+if(!r.ok && !r.body)throw Error('Generation failed');
+const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
+while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
+for(const block of blocks){const ev=(block.match(/^event: (.+)$/m)||[])[1],data=(block.match(/^data: (.+)$/m)||[])[1];if(!data)continue;const j=JSON.parse(data);
+if(ev==='progress'){s.textContent=j.message+'\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0); }
+if(ev==='error')throw Error(j.error||'Generation failed');
+if(ev==='complete')completed=j;
+}}
+if(!completed)throw Error('Builder connection ended before completion.');
+s.textContent='তৈরি হয়েছে: '+completed.files+'টি ফাইল। '+(completed.github?'Private GitHub draft প্রস্তুত।':'');
+if(completed.github?.repository_url){const p=document.createElement('p'),repo=document.createElement('a');repo.href=completed.github.repository_url;repo.target='_blank';repo.rel='noopener';repo.textContent='Private draft repository দেখুন';p.append(repo);s.append(p);
+const approve=document.createElement('button');approve.textContent='আমি অনুমোদন দিচ্ছি — Review PR তৈরি করো';approve.style.marginTop='12px';approve.onclick=async()=>{approve.disabled=true;try{const ar=await fetch('/api/approve',{method:'POST',headers:{'Content-Type':'application/json','X-Nira-Token':document.getElementById('token').value},body:JSON.stringify({owner:completed.github.owner,repo:completed.github.repo,branch:completed.github.branch})});const aj=await ar.json();if(!ar.ok)throw Error(aj.error||'Approval failed');const link=document.createElement('a');link.href=aj.pull_request_url;link.target='_blank';link.rel='noopener';link.textContent='Approved review pull request খুলুন';s.append(link);}catch(e){s.append(document.createTextNode(' অনুমোদন ব্যর্থ: '+e.message));approve.disabled=false;}};s.append(approve);
+}
+if(completed.download){const a=document.createElement('a');a.href=completed.download;a.textContent=' ZIP ডাউনলোড';a.style.display='inline-block';a.style.marginTop='12px';s.append(a)}
 }catch(e){s.textContent='সমস্যা: '+e.message}finally{b.disabled=false}};
 </script></html>
 HTML;
@@ -427,6 +444,11 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     if ($expected === '') respond(503, ['error'=>'Builder API is disabled until NIRA_BUILDER_TOKEN is configured.']);
     $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
     if (!hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
+    $GLOBALS['NIRA_SSE_MODE'] = true;
+    header('Content-Type: text/event-stream; charset=utf-8');
+    header('Cache-Control: no-cache, no-transform');
+    header('X-Accel-Buffering: no');
+    progress_event('progress', ['stage'=>'request_received','percent'=>2,'message'=>'অনুরোধ যাচাই করা হচ্ছে']);
     $raw = file_get_contents('php://input', false, null, 0, MAX_REQUEST_BYTES + 1);
     if (strlen($raw) > MAX_REQUEST_BYTES) respond(413, ['error'=>'Request too large.']);
     $input = json_decode($raw ?: '', true);
@@ -482,7 +504,9 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     ];
     $allGeneratedFiles = [];
     $apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey);
-    foreach ($generationBatches as $batch) {
+    $batchTotal = count($generationBatches);
+    foreach ($generationBatches as $batchIndex => $batch) {
+        progress_event('progress', ['stage'=>$batch['name'],'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)(($batchIndex/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>'ব্যাচ '.$batchIndex+1 .'/'.$batchTotal.' তৈরি হচ্ছে']);
         $batchText = $system."\\n\\nGENERATION BATCH: ".$batch['name'].
             "\\nSCOPE: ".$batch['scope'].
             "\\nONLY CREATE FILES MATCHING THESE PATHS/PATTERNS (glob syntax):\\n- ".
@@ -547,6 +571,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         if (count($batchResult['files']) < 1) {
             respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
         }
+        progress_event('progress', ['stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন']);
     }
     $result = ['files'=>[]];
     foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
@@ -604,8 +629,10 @@ SH;
     $runtimeFiles[] = ['path'=>'Dockerfile','content'=>$dockerContent];
     $runtimeFiles[] = ['path'=>'docker/entrypoint.sh','content'=>$entrypointContent];
     $result['files'] = $runtimeFiles;
+    progress_event('progress', ['stage'=>'validation','percent'=>80,'files_created'=>count($result['files']),'message'=>'প্রজেক্টের ফাইল ও নিরাপত্তা যাচাই হচ্ছে']);
     try { $validatedFiles = validate_laravel_project($result['files']); }
     catch (Throwable $e) { respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$e->getMessage()]); }
+    progress_event('progress', ['stage'=>'validation_complete','percent'=>88,'files_created'=>count($validatedFiles),'message'=>'যাচাই সম্পন্ন']);
     if (!class_exists(ZipArchive::class)) respond(500, ['error'=>'ZIP extension is not available.']);
     $id = bin2hex(random_bytes(12)); $storageRoot = envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated');
     if (!is_dir($storageRoot) && !mkdir($storageRoot, 0750, true) && !is_dir($storageRoot)) respond(500, ['error'=>'Could not initialize generated-project storage.']);
@@ -629,6 +656,7 @@ SH;
             @unlink($zipPath); @rmdir($base);
         } catch (Throwable $e) { respond(502, ['error'=>'ZIP created but persistent object-storage upload failed: '.$e->getMessage()]); }
     }
+    progress_event('progress', ['stage'=>'archive','percent'=>92,'files_created'=>count($validatedFiles),'message'=>'ZIP ও প্রজেক্ট আর্কাইভ প্রস্তুত হচ্ছে']);
     $response = ['ok'=>true,'name'=>$name ?: 'website','download'=>'/download.php?id='.$id,'files'=>count($validatedFiles),'storage'=>s3_configured() ? 'external_object_storage' : 'local_ephemeral'];
     $githubToken = envv('NIRA_GITHUB_TOKEN');
     if ($githubToken !== '') {
@@ -647,7 +675,38 @@ SH;
     } else {
         $response['github_notice'] = 'NIRA_GITHUB_TOKEN is not configured. ZIP storage is temporary on Render Free; configure GitHub publishing for durable free storage.';
     }
-    respond(200, $response);
+    $response['approval_required'] = true;
+    $response['preview_type'] = 'source_only';
+    progress_event('complete', $response + ['percent'=>100,'message'=>'প্রজেক্ট তৈরি হয়েছে। GitHub PR তৈরির আগে আপনার অনুমতি প্রয়োজন।']);
+    exit;
+}
+if ($path === '/api/approve' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    $expected = envv('NIRA_BUILDER_TOKEN');
+    $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
+    if ($expected === '' || !hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
+    $raw = file_get_contents('php://input', false, null, 0, 4000);
+    $input = is_string($raw) ? json_decode($raw, true) : null;
+    $owner = is_array($input) ? (string)($input['owner'] ?? '') : '';
+    $repoName = is_array($input) ? (string)($input['repo'] ?? '') : '';
+    $branch = is_array($input) ? (string)($input['branch'] ?? 'nira-generated') : 'nira-generated';
+    if (!preg_match('/^[A-Za-z0-9-]{1,39}$/', $owner) || !preg_match('/^[A-Za-z0-9._-]{1,100}$/', $repoName) || $branch !== 'nira-generated') respond(422, ['error'=>'Invalid draft project reference.']);
+    try {
+        $token = envv('NIRA_GITHUB_TOKEN');
+        if ($token === '') respond(503, ['error'=>'GitHub approval is not configured.']);
+        $repoData = github_api('GET', '/repos/'.$owner.'/'.$repoName, $token);
+        if (empty($repoData['private'])) respond(403, ['error'=>'Only private draft repositories can be approved.']);
+        $ref = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/git/ref/heads/'.rawurlencode($branch), $token);
+        $default = (string)($repoData['default_branch'] ?? 'main');
+        $existing = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/pulls?state=open&head='.rawurlencode($owner.':'.$branch).'&base='.rawurlencode($default), $token);
+        if (isset($existing[0]['html_url'])) {
+            respond(200, ['ok'=>true,'pull_request_url'=>$existing[0]['html_url'],'already_created'=>true]);
+        }
+        $pr = github_api('POST', '/repos/'.$owner.'/'.$repoName.'/pulls', $token, [
+            'title'=>'Review generated Laravel e-commerce store','head'=>$branch,'base'=>$default,
+            'body'=>"The user approved creating this review pull request. Review source and CI before merging or deploying. Generated code was not executed by the builder.",
+        ]);
+        respond(200, ['ok'=>true,'pull_request_url'=>$pr['html_url'] ?? null]);
+    } catch (Throwable $e) { respond(502, ['error'=>'Could not create the approved review pull request: '.$e->getMessage()]); }
 }
 if ($path === '/download.php') {
     $id = (string)($_GET['id'] ?? '');
