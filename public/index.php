@@ -349,21 +349,119 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     if ($apiKey === '') respond(503, ['error'=>'Server setup incomplete: GEMINI_API_KEY environment variable is missing.']);
     $model = envv('GEMINI_MODEL', 'gemini-2.5-flash');
     $system = "You are Nira's complete Laravel E-commerce application generator. Return ONLY valid JSON: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file text\"}]}. MANDATORY: generate a complete, installable Laravel Framework application, never Core PHP, plain PHP, WordPress, Node-only, or a static mockup. Require laravel/framework and a supported PHP version in composer.json. Generate up to 100 files, each <=120KB and total source <=3MB. Every required feature must be implemented end-to-end across routes, validation, authorization, controllers, services, database migrations, Blade views, and feature tests; a view or placeholder class alone does not count. Include the complete Laravel app: artisan, bootstrap/app.php, public/index.php and .htaccess, routes/web.php and auth.php, MySQL config and .env.example, models, controllers, middleware, policies, requests, migrations, seeders, Blade storefront/admin views, CSS/JS, feature tests, README, and .github/workflows/laravel-validate.yml. Required modules: responsive customer-specific storefront, search, product detail, cart, checkout, customer accounts/order history, owner admin, product/category/inventory CRUD, orders/customers, sub-admin restricted to order management with server-side authorization, JSON product attributes, Gemini product description JSON generation and live product chat, Telegram notifications/settings, Google OAuth configuration, provider-neutral configurable payment adapter and secure webhook. Derive store name, niche, catalog, currency, colors, layout, language and brand from the user's brief; do not hardcode a demo shop. Use MySQL for production and include cPanel installation instructions. Include migrations for users, products, categories, product images, carts/cart items (or secure session cart), orders, order items, inventory movements, settings, roles/permissions, payment transactions, and audit events; include seeders that create the first owner securely from environment variables or a one-time setup flow. Store money as integer minor units or fixed-precision decimals, use database transactions and row locks for stock/order changes, prevent overselling, validate shipping/tax totals server-side, and never trust client-submitted prices. Implement CSRF protection, authentication throttling, authorization policies, form requests, output escaping, upload MIME/size validation, and secure session/cookie defaults. The owner admin must be able to configure store name/logo/colors/theme/layout/currency/language/contact details, catalog, stock, shipping, and taxes. All buyer-specific integrations must be configured from dedicated owner-only Admin Panel screens without routine source-code or .env edits. Telegram settings must include bot token, chat ID, per-event notification toggles, enable/disable, test-message action and explicit Not configured/Configured/Connection failed status; missing credentials keep it disabled and no fake success is allowed. Google OAuth settings must include Client ID, Client Secret, Redirect/Callback URL, enable/disable and setup status; missing credentials keep OAuth disabled while ordinary login continues. Payment settings must allow each provider to be independently configured with display name, enabled/disabled, sandbox/live mode, API endpoint, merchant/account ID, API key, API secret, signing/webhook secret, currency, return URL and webhook URL. Encrypt secrets at rest, mask them, preserve saved values when blank secret fields are submitted, and never expose them to browser JS, HTML responses, logs or audit metadata. Show actionable validation and connection-test results. Missing or undocumented credentials leave integrations inactive/pending, never simulate successful connections or payments. The sub-admin must only view/update permitted order fields; enforce this on every route and policy. Encrypt integration/payment credentials at rest, mask secrets in admin UI, never expose secrets to browser JS or logs. Payment adapters must verify webhook signatures server-side, amount/currency/order, idempotency and atomic updates. For unconfigured providers, expose a clear disabled/pending status and safe manual/offline payment option rather than pretending online payment works. Never invent a provider API or claim a real payment integration without official docs and sandbox credentials; keep provider setup disabled/pending until configured. Never include real credentials, binaries, vendor, node_modules, .git, .env, or generated secrets. Include meaningful feature tests for storefront, admin/subadmin authorization, products/JSON chat, Telegram settings, Google OAuth, checkout, and payment webhooks. CI must run composer validate, composer install, php -l and php artisan test. Do not execute generated PHP on this builder server. Return complete files only, no markdown fences.";
-    $payload = ['contents'=>[['parts'=>[['text'=>$system."\nUSER REQUEST:\n".$prompt]]]],'generationConfig'=>['responseMimeType'=>'application/json','temperature'=>0.3,'maxOutputTokens'=>65536]];
-    $ch = curl_init('https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey));
-    curl_setopt_array($ch, [CURLOPT_POST=>true,CURLOPT_HTTPHEADER=>['Content-Type: application/json'],CURLOPT_POSTFIELDS=>json_encode($payload),CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>180]);
-    $body = curl_exec($ch); $err = curl_error($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-    if ($body === false) respond(502, ['error'=>'AI request failed: '.$err]);
-    $answer = json_decode($body, true);
-    if ($code < 200 || $code >= 300) respond(502, ['error'=>'AI provider error','detail'=>$answer['error']['message'] ?? 'Unknown provider error']);
-    $candidate = $answer['candidates'][0] ?? null;
-    if (!is_array($candidate)) respond(502, ['error'=>'AI did not return a project candidate.']);
-    $finishReason = (string)($candidate['finishReason'] ?? '');
-    if ($finishReason === 'MAX_TOKENS') respond(502, ['error'=>'AI project output reached the model output limit. Reduce the requested feature scope or split the generation into smaller modules.']);
-    $parts = $candidate['content']['parts'] ?? [];
-    $text = '';
-    foreach ($parts as $part) { if (isset($part['text']) && is_string($part['text'])) $text .= $part['text']; }
-    $result = json_decode($text, true);
+    // Generate the Laravel application in three bounded modules. This avoids
+    // truncating a complete application at Gemini's single-response token limit.
+    $generationBatches = [
+        [
+            'name'=>'framework_storefront',
+            'paths'=>[
+                'composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
+                'routes/web.php','routes/auth.php','config/auth.php','config/database.php','config/services.php',
+                '.env.example','README.md','.github/workflows/laravel-validate.yml',
+                'database/migrations/*','database/seeders/*',
+                'app/Models/*','app/Http/Requests/*','app/Http/Middleware/EnsureRole.php',
+                'app/Policies/OrderPolicy.php',
+                'app/Http/Controllers/StoreController.php','app/Http/Controllers/CartController.php',
+                'app/Http/Controllers/CheckoutController.php',
+                'resources/views/layouts/*','resources/views/store/*','resources/views/cart/*',
+                'resources/views/checkout/*'
+            ],
+            'scope'=>'Build the Laravel framework skeleton, all database migrations and seeders, models, auth/routing/configuration, storefront, customer account basics, cart and secure checkout.'
+        ],
+        [
+            'name'=>'owner_admin',
+            'paths'=>[
+                'app/Http/Controllers/Admin/*','app/Http/Controllers/Auth/GoogleController.php',
+                'app/Http/Controllers/Admin/SubAdminController.php','app/Http/Controllers/Admin/CategoryController.php',
+                'app/Http/Controllers/Admin/InventoryController.php',
+                'resources/views/admin/*','resources/views/admin/settings/*'
+            ],
+            'scope'=>'Build the complete owner admin and least-privilege sub-admin modules, authorization, catalog, orders, customers, inventory, branding/theme, shipping/tax, Google OAuth settings and their views. Integrate with the exact models, migrations, routes and service contracts implied by the application brief.'
+        ],
+        [
+            'name'=>'integrations_tests_assets',
+            'paths'=>[
+                'app/Services/*','app/Services/Payments/*',
+                'app/Http/Controllers/Chat/ProductChatController.php',
+                'app/Http/Controllers/PaymentWebhookController.php',
+                'resources/views/components/*','resources/css/app.css','resources/js/app.js',
+                'tests/Feature/*'
+            ],
+            'scope'=>'Build Telegram, Gemini product assistant, secure provider-neutral payment adapters/webhooks, product chat UI, assets, and comprehensive feature tests for every required workflow. Ensure all service/controller/view contracts match the files requested in earlier batches.'
+        ]
+    ];
+    $allGeneratedFiles = [];
+    $apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($apiKey);
+    foreach ($generationBatches as $batch) {
+        $batchText = $system."\\n\\nGENERATION BATCH: ".$batch['name'].
+            "\\nSCOPE: ".$batch['scope'].
+            "\\nONLY CREATE FILES MATCHING THESE PATHS/PATTERNS (glob syntax):\\n- ".
+            implode("\\n- ", $batch['paths']).
+            "\\nReturn JSON only in the required {files:[{path,content}]} schema. ".
+            "Do not repeat files from another batch, do not create files outside this batch, ".
+            "and do not omit any concrete required file in this batch. Use consistent Laravel 10/PHP 8.2 APIs, ".
+            "route names, model relationships, database columns and service method signatures across batches. ".
+            "No placeholders, TODOs, fake integration success, real credentials or binary files.\\nUSER REQUEST:\\n".$prompt;
+        $payload = [
+            'contents'=>[['parts'=>[['text'=>$batchText]]]],
+            'generationConfig'=>['responseMimeType'=>'application/json','temperature'=>0.2,'maxOutputTokens'=>22000]
+        ];
+        $ch = curl_init($apiUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_POST=>true,
+            CURLOPT_HTTPHEADER=>['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS=>json_encode($payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
+            CURLOPT_RETURNTRANSFER=>true,
+            CURLOPT_CONNECTTIMEOUT=>15,
+            CURLOPT_TIMEOUT=>150
+        ]);
+        $body = curl_exec($ch);
+        $err = curl_error($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($body === false) respond(502, ['error'=>'AI request failed during '.$batch['name'].' generation: '.$err]);
+        $answer = json_decode($body, true);
+        if ($code < 200 || $code >= 300) {
+            $providerMessage = $answer['error']['message'] ?? 'Unknown provider error';
+            respond(502, ['error'=>'AI provider error during '.$batch['name'].' generation','detail'=>$providerMessage]);
+        }
+        $candidate = $answer['candidates'][0] ?? null;
+        if (!is_array($candidate)) respond(502, ['error'=>'AI returned no candidate for generation batch '.$batch['name'].'.']);
+        $finishReason = (string)($candidate['finishReason'] ?? '');
+        if ($finishReason === 'MAX_TOKENS') {
+            respond(502, ['error'=>'AI output limit reached in '.$batch['name'].' batch. Reduce the requested scope and retry; no partial ZIP was published.']);
+        }
+        $parts = $candidate['content']['parts'] ?? [];
+        $batchTextOutput = '';
+        foreach ($parts as $part) {
+            if (isset($part['text']) && is_string($part['text'])) $batchTextOutput .= $part['text'];
+        }
+        $batchResult = json_decode($batchTextOutput, true);
+        if (!is_array($batchResult) || !isset($batchResult['files']) || !is_array($batchResult['files'])) {
+            respond(502, ['error'=>'AI returned invalid JSON for '.$batch['name'].' batch. No partial project was published.']);
+        }
+        foreach ($batchResult['files'] as $generatedFile) {
+            if (!is_array($generatedFile) || !isset($generatedFile['path'],$generatedFile['content'])
+                || !is_string($generatedFile['path']) || !is_string($generatedFile['content'])) {
+                respond(502, ['error'=>'AI returned a malformed file in '.$batch['name'].' batch.']);
+            }
+            $generatedPath = clean_name($generatedFile['path']);
+            if (isset($allGeneratedFiles[$generatedPath])) {
+                respond(502, ['error'=>'AI generated a duplicate path across batches: '.$generatedPath]);
+            }
+            $allGeneratedFiles[$generatedPath] = $generatedFile['content'];
+            if (count($allGeneratedFiles) > MAX_OUTPUT_FILES) {
+                respond(422, ['error'=>'Generated project exceeds the 100-file limit.']);
+            }
+        }
+        if (count($batchResult['files']) < 1) {
+            respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
+        }
+    }
+    $result = ['files'=>[]];
+    foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
+        $result['files'][] = ['path'=>$generatedPath,'content'=>$generatedContent];
+    }
     if (!is_array($result) || !isset($result['files']) || !is_array($result['files'])) respond(502, ['error'=>'AI returned an invalid project format.']);
     if (count($result['files']) < 1 || count($result['files']) >= MAX_OUTPUT_FILES) respond(502, ['error'=>'Generated project file count is outside the allowed limit after deployment files are added.']);
     // Always provide a deterministic Render-compatible runtime file; never rely on Gemini
