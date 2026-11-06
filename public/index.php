@@ -371,17 +371,18 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         [
             'name'=>'owner_admin',
             'paths'=>[
-                'app/Http/Controllers/Admin/*','app/Http/Controllers/Auth/GoogleController.php',
-                'app/Http/Controllers/Admin/SubAdminController.php','app/Http/Controllers/Admin/CategoryController.php',
-                'app/Http/Controllers/Admin/InventoryController.php',
-                'resources/views/admin/*','resources/views/admin/settings/*'
+                'app/Http/Controllers/Admin/*.php','app/Http/Controllers/Auth/GoogleController.php',
+                'resources/views/admin/*.blade.php','resources/views/admin/products/*.blade.php',
+                'resources/views/admin/orders/*.blade.php','resources/views/admin/categories/*.blade.php',
+                'resources/views/admin/inventory/*.blade.php','resources/views/admin/subadmins/*.blade.php',
+                'resources/views/admin/customers/*.blade.php','resources/views/admin/settings/*.blade.php'
             ],
             'scope'=>'Build the complete owner admin and least-privilege sub-admin modules, authorization, catalog, orders, customers, inventory, branding/theme, shipping/tax, Google OAuth settings and their views. Integrate with the exact models, migrations, routes and service contracts implied by the application brief.'
         ],
         [
             'name'=>'integrations_tests_assets',
             'paths'=>[
-                'app/Services/*','app/Services/Payments/*',
+                'app/Services/*.php','app/Services/Payments/*.php',
                 'app/Http/Controllers/Chat/ProductChatController.php',
                 'app/Http/Controllers/PaymentWebhookController.php',
                 'resources/views/components/*','resources/css/app.css','resources/js/app.js',
