@@ -570,6 +570,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git unzip libzi
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www/html
 COPY . .
+COPY docker/entrypoint.sh /usr/local/bin/nira-entrypoint
 RUN composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \
     && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache database \
     && chmod +x /usr/local/bin/nira-entrypoint \
