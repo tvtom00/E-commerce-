@@ -27,7 +27,7 @@ function clean_name(string $name): string {
 
 function validate_laravel_project(array $rawFiles): array {
     $required = [
-        'Dockerfile','composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
+        'Dockerfile','docker/entrypoint.sh','composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
         'routes/web.php','routes/auth.php','README.md','.env.example',
         '.github/workflows/laravel-validate.yml',
         'config/auth.php','config/database.php','config/services.php',
@@ -89,7 +89,7 @@ function validate_laravel_project(array $rawFiles): array {
         if ($fileBytes > MAX_FILE_BYTES) throw new RuntimeException('A generated file exceeded the 120 KB size limit.');
         $totalBytes += $fileBytes;
         if ($totalBytes > MAX_TOTAL_BYTES) throw new RuntimeException('Generated project exceeded the 3 MB total source limit.');
-        if (!preg_match('/\\.(php|blade\\.php|css|js|json|md|ya?ml|xml|txt|htaccess)$/i', $path)
+        if (!preg_match('/\\.(php|blade\\.php|css|js|json|md|ya?ml|xml|txt|htaccess|sh)$/i', $path)
             && !in_array($base, ['artisan','dockerfile','.gitignore','.env.example'], true)) {
             throw new RuntimeException('Generated project contains an unsupported or binary file.');
         }
@@ -102,9 +102,15 @@ function validate_laravel_project(array $rawFiles): array {
         if (!array_key_exists($path, $files)) throw new RuntimeException('Laravel E-commerce output is missing required file: '.$path);
     }
     $dockerfile = $files['Dockerfile'];
-    foreach (['FROM php:', 'pdo_mysql', 'pdo_pgsql', 'composer install', 'EXPOSE 10000', 'artisan migrate'] as $dockerCheck) {
+    foreach (['FROM php:', 'pdo_mysql', 'pdo_pgsql', 'composer install', 'EXPOSE 10000', 'docker/entrypoint.sh', 'nira-entrypoint'] as $dockerCheck) {
         if (stripos($dockerfile, $dockerCheck) === false) {
             throw new RuntimeException('Render Dockerfile is missing required runtime configuration: '.$dockerCheck);
+        }
+    }
+    $entrypoint = $files['docker/entrypoint.sh'];
+    foreach (['artisan migrate --force','apache2-foreground','DB_HOST','DB_URL'] as $runtimeNeedle) {
+        if (stripos($entrypoint, $runtimeNeedle) === false) {
+            throw new RuntimeException('Generated deployment entrypoint is missing safe startup behavior: '.$runtimeNeedle);
         }
     }
     $manifest = json_decode($files['composer.json'], true);
@@ -548,14 +554,9 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     }
     if (!is_array($result) || !isset($result['files']) || !is_array($result['files'])) respond(502, ['error'=>'AI returned an invalid project format.']);
     if (count($result['files']) < 1 || count($result['files']) >= MAX_OUTPUT_FILES) respond(502, ['error'=>'Generated project file count is outside the allowed limit after deployment files are added.']);
-    // Always provide a deterministic Render-compatible runtime file; never rely on Gemini
-    // remembering infrastructure boilerplate in a large source-generation response.
-    $hasDockerfile = false;
-    foreach ($result['files'] as $generatedFile) {
-        if (is_array($generatedFile) && ($generatedFile['path'] ?? '') === 'Dockerfile') { $hasDockerfile = true; break; }
-    }
-    if (!$hasDockerfile) {
-        $dockerContent = <<<'DOCKER'
+    // Replace model-authored deployment plumbing with a deterministic runtime.
+    // Missing buyer database credentials must not prevent Apache from starting.
+    $dockerContent = <<<'DOCKER'
 FROM php:8.3-apache
 RUN apt-get update && apt-get install -y --no-install-recommends git unzip libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev libicu-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
@@ -571,13 +572,37 @@ WORKDIR /var/www/html
 COPY . .
 RUN composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \
     && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache database \
+    && chmod +x /usr/local/bin/nira-entrypoint \
     && chown -R www-data:www-data storage bootstrap/cache database
 ENV APP_ENV=production APP_DEBUG=false DB_CONNECTION=mysql
 EXPOSE 10000
-CMD ["sh", "-c", "php artisan migrate --force && apache2-foreground"]
+CMD ["/usr/local/bin/nira-entrypoint"]
 DOCKER;
-        $result['files'][] = ['path'=>'Dockerfile','content'=>$dockerContent];
+    $entrypointContent = <<<'SH'
+#!/bin/sh
+set -eu
+cd /var/www/html
+if [ ! -f artisan ]; then
+    echo "Laravel artisan file is missing; refusing to start an incomplete project." >&2
+    exit 1
+fi
+if [ -n "${DB_URL:-}" ] || [ -n "${DATABASE_URL:-}" ] || [ -n "${DB_HOST:-}" ]; then
+    echo "Database configuration detected; applying Laravel migrations."
+    php artisan migrate --force
+else
+    echo "Database credentials are not configured yet; skipping migrations and starting the app."
+fi
+exec apache2-foreground
+SH;
+    $runtimeFiles = [];
+    foreach ($result['files'] as $generatedFile) {
+        if (!is_array($generatedFile) || !isset($generatedFile['path'])) continue;
+        if (in_array($generatedFile['path'], ['Dockerfile','docker/entrypoint.sh'], true)) continue;
+        $runtimeFiles[] = $generatedFile;
     }
+    $runtimeFiles[] = ['path'=>'Dockerfile','content'=>$dockerContent];
+    $runtimeFiles[] = ['path'=>'docker/entrypoint.sh','content'=>$entrypointContent];
+    $result['files'] = $runtimeFiles;
     try { $validatedFiles = validate_laravel_project($result['files']); }
     catch (Throwable $e) { respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$e->getMessage()]); }
     if (!class_exists(ZipArchive::class)) respond(500, ['error'=>'ZIP extension is not available.']);
