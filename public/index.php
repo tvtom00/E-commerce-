@@ -37,20 +37,33 @@ function allow_long_execution(): void {
 
 
 /**
- * Prefer Groq for cost-efficient Builder generation, then fall back to OpenAI and Gemini.
- * Provider diagnostics never include credentials or response bodies.
+ * Prefer free Gemini models first. Groq is a secondary provider; OpenAI is
+ * only used when explicitly enabled so an empty paid balance is never hit.
  */
 function ai_request_json(string $prompt, int $maxOutputTokens): array {
     $providers = [];
-    $openaiKey = envv('OPENAI_API_KEY');
     $geminiKey = envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY'));
     $groqKey = envv('GROQ_API_KEY');
-    if ($groqKey !== '') $providers[] = ['name'=>'Groq','key'=>$groqKey];
-    if ($openaiKey !== '') $providers[] = ['name'=>'OpenAI','key'=>$openaiKey];
-    if ($geminiKey !== '') $providers[] = ['name'=>'Gemini','key'=>$geminiKey];
-    if (!$providers) throw new RuntimeException('No AI provider is configured. Add GROQ_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY in Render Environment.');
+    $openaiKey = envv('OPENAI_API_KEY');
 
-    error_log('[NIRA_BUILDER_AI] configured_providers='.implode(',', array_column($providers, 'name')));
+    if ($geminiKey !== '') {
+        $primaryModel = envv('GEMINI_MODEL', 'gemini-3.8-flash');
+        $fallbackModel = envv('GEMINI_FALLBACK_MODEL', 'gemini-3.6-flash');
+        $providers[] = ['name'=>'Gemini','key'=>$geminiKey,'model'=>$primaryModel];
+        if ($fallbackModel !== '' && $fallbackModel !== $primaryModel) {
+            $providers[] = ['name'=>'Gemini','key'=>$geminiKey,'model'=>$fallbackModel];
+        }
+    }
+    if ($groqKey !== '') $providers[] = ['name'=>'Groq','key'=>$groqKey];
+    if ($openaiKey !== '' && filter_var(envv('ENABLE_OPENAI_FALLBACK', 'false'), FILTER_VALIDATE_BOOLEAN)) {
+        $providers[] = ['name'=>'OpenAI','key'=>$openaiKey];
+    }
+    if (!$providers) throw new RuntimeException('No free AI provider is configured. Add GEMINI_API_KEY in Render Environment; Groq is optional.');
+
+    error_log('[NIRA_BUILDER_AI] configured_providers='.implode(',', array_map(
+        static fn(array $p): string => $p['name'].(isset($p['model']) ? ':'.$p['model'] : ''),
+        $providers
+    )));
     $errors = [];
     foreach ($providers as $provider) {
         for ($attempt = 1; $attempt <= 2; $attempt++) {
@@ -65,7 +78,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                     'max_completion_tokens'=>$maxOutputTokens
                 ];
             } else {
-                $model = envv('GEMINI_MODEL', 'gemini-3.6-flash');
+                $model = $provider['model'];
                 $url = 'https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($provider['key']);
                 $headers = ['Content-Type: application/json'];
                 $payload = [
@@ -102,7 +115,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 }
                 $decoded = json_decode($text, true);
                 if (!is_array($decoded) && trim($text) !== '') {
-                    $candidateText = preg_replace('/^\s*```(?:json)?\s*|\s*```\s*$/i', '', trim($text));
+                    $candidateText = preg_replace('/^\\s*```(?:json)?\\s*|\\s*```\\s*$/i', '', trim($text));
                     if (is_string($candidateText)) {
                         $decoded = json_decode(trim($candidateText), true);
                         if (!is_array($decoded)) {
@@ -115,33 +128,32 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                     }
                 }
                 if (is_array($decoded)) {
-                    error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' result=success attempt='.$attempt.' response_chars='.strlen($text));
-                    return ['text'=>json_encode($decoded, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'provider'=>$provider['name'],'finish_reason'=>$finishReason];
+                    error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=success attempt='.$attempt.' response_chars='.strlen($text));
+                    return ['text'=>json_encode($decoded, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'provider'=>$provider['name'],'model'=>$model,'finish_reason'=>$finishReason];
                 }
                 $detail = $finishReason !== '' ? ' (finishReason='.$finishReason.', response_chars='.strlen($text).')' : ' (response_chars='.strlen($text).')';
-                $errors[] = $provider['name'].' returned invalid or incomplete JSON'.$detail;
-                error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' result=invalid_json attempt='.$attempt.$detail);
+                $errors[] = $provider['name'].' '.$model.' returned invalid or incomplete JSON'.$detail;
+                error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=invalid_json attempt='.$attempt.$detail);
                 if ($attempt < 2) continue;
                 break;
             }
 
             $message = (string)($answer['error']['message'] ?? ($err ?: 'HTTP '.$code));
-            // Never echo even a provider-masked API key fragment into Nira or Render logs.
             if ($provider['name'] === 'OpenAI' && $code === 401) {
                 $message = 'Authentication failed. Check OPENAI_API_KEY in the Builder Render Environment.';
             } elseif ($provider['name'] === 'Groq' && $code === 401) {
                 $message = 'Authentication failed. Check GROQ_API_KEY in the Builder Render Environment.';
             } elseif ($provider['name'] === 'Gemini' && in_array($code, [429, 503], true)) {
-                $message = 'Gemini is temporarily overloaded (HTTP '.$code.'). Retry later or configure an available Gemini model.';
+                $message = 'Gemini model '.$model.' is temporarily rate-limited or overloaded (HTTP '.$code.').';
             } else {
                 $message = preg_replace('/(?i)(incorrect api key provided:\\s*)[^.]+/', '$1[REDACTED]', $message);
                 $message = preg_replace('/(?i)(sk-(?:proj-)?[A-Za-z0-9_*.-]{8,}|AIza[0-9A-Za-z_*-]{20,})/', '[REDACTED]', $message);
             }
-            $errors[] = $provider['name'].' HTTP '.$code.': '.substr($message, 0, 240);
-            error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 160));
+            $errors[] = $provider['name'].' '.$model.' HTTP '.$code.': '.substr($message, 0, 240);
+            error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 160));
             $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true);
             if (!$retryable || $attempt === 2) break;
-            sleep(2);
+            sleep($code === 429 ? 10 : 4);
         }
     }
     throw new RuntimeException('All configured AI providers failed. '.implode(' | ', $errors));
