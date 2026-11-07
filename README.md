@@ -11,7 +11,9 @@ A lightweight PHP 8.2 + Apache service for generating website project ZIPs from 
 
 ## Environment variables
 - GEMINI_API_KEY: required; set privately in Render.
-- GEMINI_MODEL: optional; defaults to gemini-3.6-flash. Change to a model available to your API key if needed.
+- GEMINI_MODEL: optional; defaults to gemini-3.8-flash, with a Gemini 3.6 Flash fallback.
+- GEMINI_FALLBACK_MODEL: optional; defaults to gemini-3.6-flash.
+- ENABLE_OPENAI_FALLBACK: optional; defaults to false. Set true only if you intentionally want to allow paid OpenAI API usage. Gemini is tried first; Groq is secondary.
 - NIRA_BUILDER_TOKEN: required shared secret. The generation API stays disabled until this is set privately in Render; callers must send it as X-Nira-Token.
 - NIRA_GITHUB_TOKEN: required for durable free project storage. Use a fine-grained GitHub token with permission to create private repositories and read/write repository contents and pull requests. Each validated project is committed to a new private repository on a review branch. The response download URL points to the private repository branch ZIP, which remains available in GitHub after Render restarts.
 - NIRA_STORAGE_PATH: optional local path for temporary ZIP creation. Render Free local files are ephemeral; GitHub private repositories are used as the durable free archive when NIRA_GITHUB_TOKEN is configured.
@@ -35,4 +37,4 @@ Returns JSON with a download URL. If NIRA_GITHUB_TOKEN is configured, it also cr
 GET /health returns service health.
 
 ## Resource limits
-Generation is limited to 100 text files, 120 KB per file, 3 MB total source, and 12 KB request payload. Gemini generates the Laravel project in three bounded batches; duplicate paths and incomplete outputs are rejected. Generated ZIPs use S3-compatible external storage when configured; otherwise they are stored on the container filesystem and can be lost on restart/redeploy. This service does not deploy generated projects to production. Review and merge the GitHub pull request, configure MySQL and provider credentials, then deploy separately.
+Generation is limited to 100 text files, 120 KB per file, 3 MB total source, and 12 KB request payload. Gemini is the primary free-tier provider (Gemini 3.8 Flash, then 3.6 Flash fallback), Groq is secondary, and OpenAI is disabled unless explicitly enabled. The Laravel project is generated in eight sequential bounded batches; duplicate paths and incomplete outputs are rejected. Generated ZIPs use S3-compatible external storage when configured; otherwise they are stored on the container filesystem and can be lost on restart/redeploy. This service does not deploy generated projects to production. Review and merge the GitHub pull request, configure MySQL and provider credentials, then deploy separately.
