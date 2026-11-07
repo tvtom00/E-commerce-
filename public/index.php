@@ -686,12 +686,24 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             'scope'=>'Build the installable Laravel framework skeleton, production configuration, routing, auth foundation, documentation and CI workflow.'
         ],
         [
-            'name'=>'database_and_models',
-            'paths'=>[
-                'database/migrations/*','database/seeders/*','app/Models/*',
-                'app/Http/Requests/*','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'
-            ],
-            'scope'=>'Build all MySQL/PostgreSQL-compatible migrations, secure owner seed/setup, Eloquent models, form requests, role middleware and order authorization policy. Match framework and route contracts.'
+            'name'=>'core_migrations',
+            'paths'=>['database/migrations/*'],
+            'scope'=>'Create only the core migrations for users, products, categories, settings and roles. Keep each migration concise, use safe indexes/foreign keys, and do not create carts, orders, inventory or payment tables in this batch.'
+        ],
+        [
+            'name'=>'commerce_migrations_and_seeders',
+            'paths'=>['database/migrations/*','database/seeders/*'],
+            'scope'=>'Create the remaining commerce migrations only: carts/cart_items, orders/order_items, inventory_movements, payment_transactions and audit_events, plus secure owner seeder/setup. Do not repeat users, products, categories, settings or roles migrations.'
+        ],
+        [
+            'name'=>'eloquent_models',
+            'paths'=>['app/Models/*'],
+            'scope'=>'Create all required Eloquent models only: Product, Category, Order, Setting, Role and any supporting models needed for the already specified schema. Define relationships, casts and guarded/fillable fields consistently with migrations.'
+        ],
+        [
+            'name'=>'authorization_and_requests',
+            'paths'=>['app/Http/Requests/*','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'],
+            'scope'=>'Create form request validation classes, role middleware and OrderPolicy only. Enforce owner/sub-admin permissions server-side and match the previously defined models and route contracts.'
         ],
         [
             'name'=>'storefront_and_checkout',
