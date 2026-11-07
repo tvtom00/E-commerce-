@@ -37,22 +37,23 @@ function allow_long_execution(): void {
 
 
 /**
- * Prefer OpenAI, then Gemini, then Groq for Builder generation.
- * Returns decoded JSON text plus the provider name; credentials are never returned.
+ * Prefer Groq for cost-efficient Builder generation, then fall back to OpenAI and Gemini.
+ * Provider diagnostics never include credentials or response bodies.
  */
 function ai_request_json(string $prompt, int $maxOutputTokens): array {
     $providers = [];
     $openaiKey = envv('OPENAI_API_KEY');
     $geminiKey = envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY'));
     $groqKey = envv('GROQ_API_KEY');
+    if ($groqKey !== '') $providers[] = ['name'=>'Groq','key'=>$groqKey];
     if ($openaiKey !== '') $providers[] = ['name'=>'OpenAI','key'=>$openaiKey];
     if ($geminiKey !== '') $providers[] = ['name'=>'Gemini','key'=>$geminiKey];
-    if ($groqKey !== '') $providers[] = ['name'=>'Groq','key'=>$groqKey];
-    if (!$providers) throw new RuntimeException('No AI provider is configured. Add OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in Render Environment.');
+    if (!$providers) throw new RuntimeException('No AI provider is configured. Add GROQ_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY in Render Environment.');
 
+    error_log('[NIRA_BUILDER_AI] configured_providers='.implode(',', array_column($providers, 'name')));
     $errors = [];
     foreach ($providers as $provider) {
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
             if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
                 $url = $provider['name'] === 'Groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
                 $model = $provider['name'] === 'Groq' ? envv('GROQ_MODEL', 'llama-3.3-70b-versatile') : envv('OPENAI_MODEL', 'gpt-4.1-mini');
@@ -114,11 +115,13 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                     }
                 }
                 if (is_array($decoded)) {
+                    error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' result=success attempt='.$attempt.' response_chars='.strlen($text));
                     return ['text'=>json_encode($decoded, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'provider'=>$provider['name'],'finish_reason'=>$finishReason];
                 }
                 $detail = $finishReason !== '' ? ' (finishReason='.$finishReason.', response_chars='.strlen($text).')' : ' (response_chars='.strlen($text).')';
                 $errors[] = $provider['name'].' returned invalid or incomplete JSON'.$detail;
-                if ($attempt < 3) continue;
+                error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' result=invalid_json attempt='.$attempt.$detail);
+                if ($attempt < 2) continue;
                 break;
             }
 
@@ -135,9 +138,10 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 $message = preg_replace('/(?i)(sk-(?:proj-)?[A-Za-z0-9_*.-]{8,}|AIza[0-9A-Za-z_*-]{20,})/', '[REDACTED]', $message);
             }
             $errors[] = $provider['name'].' HTTP '.$code.': '.substr($message, 0, 240);
+            error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 160));
             $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true);
-            if (!$retryable || $attempt === 3) break;
-            sleep($attempt === 1 ? 2 : 5);
+            if (!$retryable || $attempt === 2) break;
+            sleep(2);
         }
     }
     throw new RuntimeException('All configured AI providers failed. '.implode(' | ', $errors));
@@ -616,9 +620,10 @@ if ($path === '/health') {
     $health = [
         'ok'=>true,
         'service'=>'nira-website-builder',
+        'groq_configured'=>envv('GROQ_API_KEY') !== '',
         'openai_configured'=>envv('OPENAI_API_KEY') !== '',
         'gemini_configured'=>envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) !== '',
-        'active_ai_provider'=>envv('OPENAI_API_KEY') !== '' ? 'OpenAI (Gemini fallback)' : (envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) !== '' ? 'Gemini' : 'Not configured'),
+        'active_ai_provider'=>envv('GROQ_API_KEY') !== '' ? 'Groq (OpenAI/Gemini fallback)' : (envv('OPENAI_API_KEY') !== '' ? 'OpenAI (Gemini fallback)' : (envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) !== '' ? 'Gemini' : 'Not configured')),
         'github_publishing_configured'=>envv('NIRA_GITHUB_TOKEN') !== '',
         'github_token_valid'=>github_token_is_valid(),
         'storage_writable'=>$storageReady,
