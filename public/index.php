@@ -56,7 +56,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
                 $url = $provider['name'] === 'Groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
-                $model = $provider['name'] === 'Groq' ? envv('GROQ_MODEL', 'llama-3.3-70b-versatile') : envv('OPENAI_MODEL', 'gpt-4.1-mini');
+                $model = $provider['name'] === 'Groq' ? envv('GROQ_MODEL', 'openai/gpt-oss-120b') : envv('OPENAI_MODEL', 'gpt-4.1-mini');
                 $headers = ['Content-Type: application/json', 'Authorization: Bearer '.$provider['key']];
                 $payload = [
                     'model'=>$model,
