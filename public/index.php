@@ -37,23 +37,25 @@ function allow_long_execution(): void {
 
 
 /**
- * Prefer OpenAI for Builder generation and fall back to Gemini when unavailable.
+ * Prefer OpenAI, then Gemini, then Groq for Builder generation.
  * Returns decoded JSON text plus the provider name; credentials are never returned.
  */
 function ai_request_json(string $prompt, int $maxOutputTokens): array {
     $providers = [];
     $openaiKey = envv('OPENAI_API_KEY');
     $geminiKey = envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY'));
+    $groqKey = envv('GROQ_API_KEY');
     if ($openaiKey !== '') $providers[] = ['name'=>'OpenAI','key'=>$openaiKey];
     if ($geminiKey !== '') $providers[] = ['name'=>'Gemini','key'=>$geminiKey];
-    if (!$providers) throw new RuntimeException('No AI provider is configured. Add OPENAI_API_KEY or GEMINI_API_KEY in Render Environment.');
+    if ($groqKey !== '') $providers[] = ['name'=>'Groq','key'=>$groqKey];
+    if (!$providers) throw new RuntimeException('No AI provider is configured. Add OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in Render Environment.');
 
     $errors = [];
     foreach ($providers as $provider) {
         for ($attempt = 1; $attempt <= 3; $attempt++) {
-            if ($provider['name'] === 'OpenAI') {
-                $url = 'https://api.openai.com/v1/chat/completions';
-                $model = envv('OPENAI_MODEL', 'gpt-4.1-mini');
+            if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
+                $url = $provider['name'] === 'Groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+                $model = $provider['name'] === 'Groq' ? envv('GROQ_MODEL', 'llama-3.3-70b-versatile') : envv('OPENAI_MODEL', 'gpt-4.1-mini');
                 $headers = ['Content-Type: application/json', 'Authorization: Bearer '.$provider['key']];
                 $payload = [
                     'model'=>$model,
@@ -86,7 +88,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
 
             $answer = is_string($body) ? json_decode($body, true) : null;
             if (is_string($body) && $code >= 200 && $code < 300 && is_array($answer)) {
-                if ($provider['name'] === 'OpenAI') {
+                if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
                     $text = (string)($answer['choices'][0]['message']['content'] ?? '');
                     $finishReason = (string)($answer['choices'][0]['finish_reason'] ?? '');
                 } else {
@@ -123,7 +125,9 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             $message = (string)($answer['error']['message'] ?? ($err ?: 'HTTP '.$code));
             // Never echo even a provider-masked API key fragment into Nira or Render logs.
             if ($provider['name'] === 'OpenAI' && $code === 401) {
-                $message = 'Authentication failed. Check or replace OPENAI_API_KEY in the Builder Render Environment.';
+                $message = 'Authentication failed. Check OPENAI_API_KEY in the Builder Render Environment.';
+            } elseif ($provider['name'] === 'Groq' && $code === 401) {
+                $message = 'Authentication failed. Check GROQ_API_KEY in the Builder Render Environment.';
             } elseif ($provider['name'] === 'Gemini' && in_array($code, [429, 503], true)) {
                 $message = 'Gemini is temporarily overloaded (HTTP '.$code.'). Retry later or configure an available Gemini model.';
             } else {
@@ -647,8 +651,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $name = preg_replace('/[^a-zA-Z0-9_-]/', '-', (string)($input['name'] ?? 'website'));
     if (strlen($prompt) < 20) respond(422, ['error'=>'কমপক্ষে ২০ অক্ষরের বিস্তারিত নির্দেশনা দিন।']);
     if (strlen($prompt) > 9000) respond(422, ['error'=>'নির্দেশনা খুব বড়।']);
-    if (envv('OPENAI_API_KEY') === '' && envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) === '') {
-        respond(503, ['error'=>'Server setup incomplete: configure OPENAI_API_KEY or GEMINI_API_KEY in Render Environment.']);
+    if (envv('OPENAI_API_KEY') === '' && envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) === '' && envv('GROQ_API_KEY') === '') {
+        respond(503, ['error'=>'Server setup incomplete: configure OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in Render Environment.']);
     }
     $system = "You are Nira's complete Laravel E-commerce application generator. Return ONLY valid JSON: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file text\"}]}. MANDATORY: generate a complete, installable Laravel Framework application, never Core PHP, plain PHP, WordPress, Node-only, or a static mockup. Require laravel/framework and a supported PHP version in composer.json. Generate up to 100 files, each <=120KB and total source <=3MB. Every required feature must be implemented end-to-end across routes, validation, authorization, controllers, services, database migrations, Blade views, and feature tests; a view or placeholder class alone does not count. Include the complete Laravel app: artisan, bootstrap/app.php, public/index.php and .htaccess, routes/web.php and auth.php, MySQL config and .env.example, models, controllers, middleware, policies, requests, migrations, seeders, Blade storefront/admin views, CSS/JS, feature tests, README, and .github/workflows/laravel-validate.yml. Required modules: responsive customer-specific storefront, search, product detail, cart, checkout, customer accounts/order history, owner admin, product/category/inventory CRUD, orders/customers, sub-admin restricted to order management with server-side authorization, JSON product attributes, Gemini product description JSON generation and live product chat, Telegram notifications/settings, Google OAuth configuration, provider-neutral configurable payment adapter and secure webhook. Derive store name, niche, catalog, currency, colors, layout, language and brand from the user's brief; do not hardcode a demo shop. Use MySQL for production and include cPanel installation instructions. Include migrations for users, products, categories, product images, carts/cart items (or secure session cart), orders, order items, inventory movements, settings, roles/permissions, payment transactions, and audit events; include seeders that create the first owner securely from environment variables or a one-time setup flow. Store money as integer minor units or fixed-precision decimals, use database transactions and row locks for stock/order changes, prevent overselling, validate shipping/tax totals server-side, and never trust client-submitted prices. Implement CSRF protection, authentication throttling, authorization policies, form requests, output escaping, upload MIME/size validation, and secure session/cookie defaults. The owner admin must be able to configure store name/logo/colors/theme/layout/currency/language/contact details, catalog, stock, shipping, and taxes. All buyer-specific integrations must be configured from dedicated owner-only Admin Panel screens without routine source-code or .env edits. Telegram settings must include bot token, chat ID, per-event notification toggles, enable/disable, test-message action and explicit Not configured/Configured/Connection failed status; missing credentials keep it disabled and no fake success is allowed. Google OAuth settings must include Client ID, Client Secret, Redirect/Callback URL, enable/disable and setup status; missing credentials keep OAuth disabled while ordinary login continues. Payment settings must allow each provider to be independently configured with display name, enabled/disabled, sandbox/live mode, API endpoint, merchant/account ID, API key, API secret, signing/webhook secret, currency, return URL and webhook URL. Encrypt secrets at rest, mask them, preserve saved values when blank secret fields are submitted, and never expose them to browser JS, HTML responses, logs or audit metadata. Show actionable validation and connection-test results. Missing or undocumented credentials leave integrations inactive/pending, never simulate successful connections or payments. The sub-admin must only view/update permitted order fields; enforce this on every route and policy. Encrypt integration/payment credentials at rest, mask secrets in admin UI, never expose secrets to browser JS or logs. Payment adapters must verify webhook signatures server-side, amount/currency/order, idempotency and atomic updates. For unconfigured providers, expose a clear disabled/pending status and safe manual/offline payment option rather than pretending online payment works. Never invent a provider API or claim a real payment integration without official docs and sandbox credentials; keep provider setup disabled/pending until configured. Never include real credentials, binaries, vendor, node_modules, .git, .env, or generated secrets. Include meaningful feature tests for storefront, admin/subadmin authorization, products/JSON chat, Telegram settings, Google OAuth, checkout, and payment webhooks. CI must run composer validate, composer install, php -l and php artisan test. Do not execute generated PHP on this builder server. Return complete files only, no markdown fences.";
     // Generate the Laravel application in three bounded modules. This avoids
@@ -874,8 +878,8 @@ if ($path === '/api/revise' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         respond(422, ['error'=>'Provide a valid private draft repository, nira-generated branch and a 5–2500 character design instruction.']);
     }
     $token = envv('NIRA_GITHUB_TOKEN');
-    if ($token === '' || (envv('OPENAI_API_KEY') === '' && envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) === '')) {
-        respond(503, ['error'=>'GitHub and at least one AI provider (OPENAI_API_KEY or GEMINI_API_KEY) must be configured for revisions.']);
+    if ($token === '' || (envv('OPENAI_API_KEY') === '' && envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) === '' && envv('GROQ_API_KEY') === '')) {
+        respond(503, ['error'=>'GitHub and at least one AI provider (OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY) must be configured for revisions.']);
     }
     try {
         $repoData = github_api('GET', '/repos/'.$owner.'/'.$repoName, $token);
