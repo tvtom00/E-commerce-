@@ -98,8 +98,25 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                     $finishReason = (string)($candidate['finishReason'] ?? '');
                 }
                 $decoded = json_decode($text, true);
-                if (is_array($decoded)) return ['text'=>$text,'provider'=>$provider['name'],'finish_reason'=>$finishReason];
-                $errors[] = $provider['name'].' returned invalid JSON.';
+                if (!is_array($decoded) && trim($text) !== '') {
+                    $candidateText = preg_replace('/^\s*```(?:json)?\s*|\s*```\s*$/i', '', trim($text));
+                    if (is_string($candidateText)) {
+                        $decoded = json_decode(trim($candidateText), true);
+                        if (!is_array($decoded)) {
+                            $firstBrace = strpos($candidateText, '{');
+                            $lastBrace = strrpos($candidateText, '}');
+                            if ($firstBrace !== false && $lastBrace !== false && $lastBrace > $firstBrace) {
+                                $decoded = json_decode(substr($candidateText, $firstBrace, $lastBrace - $firstBrace + 1), true);
+                            }
+                        }
+                    }
+                }
+                if (is_array($decoded)) {
+                    return ['text'=>json_encode($decoded, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'provider'=>$provider['name'],'finish_reason'=>$finishReason];
+                }
+                $detail = $finishReason !== '' ? ' (finishReason='.$finishReason.', response_chars='.strlen($text).')' : ' (response_chars='.strlen($text).')';
+                $errors[] = $provider['name'].' returned invalid or incomplete JSON'.$detail;
+                if ($attempt < 3) continue;
                 break;
             }
 
