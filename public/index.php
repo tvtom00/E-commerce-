@@ -115,7 +115,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 }
                 $decoded = json_decode($text, true);
                 if (!is_array($decoded) && trim($text) !== '') {
-                    $candidateText = preg_replace('/^\\s*```(?:json)?\\s*|\\s*```\\s*$/i', '', trim($text));
+                    $candidateText = preg_replace('/^\s*```(?:json)?\s*|\s*```\s*$/i', '', trim($text));
                     if (is_string($candidateText)) {
                         $decoded = json_decode(trim($candidateText), true);
                         if (!is_array($decoded)) {
