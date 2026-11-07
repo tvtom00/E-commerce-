@@ -660,46 +660,73 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         respond(503, ['error'=>'Server setup incomplete: configure OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in Render Environment.']);
     }
     $system = "You are Nira's complete Laravel E-commerce application generator. Return ONLY valid JSON: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file text\"}]}. MANDATORY: generate a complete, installable Laravel Framework application, never Core PHP, plain PHP, WordPress, Node-only, or a static mockup. Require laravel/framework and a supported PHP version in composer.json. Generate up to 100 files, each <=120KB and total source <=3MB. Every required feature must be implemented end-to-end across routes, validation, authorization, controllers, services, database migrations, Blade views, and feature tests; a view or placeholder class alone does not count. Include the complete Laravel app: artisan, bootstrap/app.php, public/index.php and .htaccess, routes/web.php and auth.php, MySQL config and .env.example, models, controllers, middleware, policies, requests, migrations, seeders, Blade storefront/admin views, CSS/JS, feature tests, README, and .github/workflows/laravel-validate.yml. Required modules: responsive customer-specific storefront, search, product detail, cart, checkout, customer accounts/order history, owner admin, product/category/inventory CRUD, orders/customers, sub-admin restricted to order management with server-side authorization, JSON product attributes, Gemini product description JSON generation and live product chat, Telegram notifications/settings, Google OAuth configuration, provider-neutral configurable payment adapter and secure webhook. Derive store name, niche, catalog, currency, colors, layout, language and brand from the user's brief; do not hardcode a demo shop. Use MySQL for production and include cPanel installation instructions. Include migrations for users, products, categories, product images, carts/cart items (or secure session cart), orders, order items, inventory movements, settings, roles/permissions, payment transactions, and audit events; include seeders that create the first owner securely from environment variables or a one-time setup flow. Store money as integer minor units or fixed-precision decimals, use database transactions and row locks for stock/order changes, prevent overselling, validate shipping/tax totals server-side, and never trust client-submitted prices. Implement CSRF protection, authentication throttling, authorization policies, form requests, output escaping, upload MIME/size validation, and secure session/cookie defaults. The owner admin must be able to configure store name/logo/colors/theme/layout/currency/language/contact details, catalog, stock, shipping, and taxes. All buyer-specific integrations must be configured from dedicated owner-only Admin Panel screens without routine source-code or .env edits. Telegram settings must include bot token, chat ID, per-event notification toggles, enable/disable, test-message action and explicit Not configured/Configured/Connection failed status; missing credentials keep it disabled and no fake success is allowed. Google OAuth settings must include Client ID, Client Secret, Redirect/Callback URL, enable/disable and setup status; missing credentials keep OAuth disabled while ordinary login continues. Payment settings must allow each provider to be independently configured with display name, enabled/disabled, sandbox/live mode, API endpoint, merchant/account ID, API key, API secret, signing/webhook secret, currency, return URL and webhook URL. Encrypt secrets at rest, mask them, preserve saved values when blank secret fields are submitted, and never expose them to browser JS, HTML responses, logs or audit metadata. Show actionable validation and connection-test results. Missing or undocumented credentials leave integrations inactive/pending, never simulate successful connections or payments. The sub-admin must only view/update permitted order fields; enforce this on every route and policy. Encrypt integration/payment credentials at rest, mask secrets in admin UI, never expose secrets to browser JS or logs. Payment adapters must verify webhook signatures server-side, amount/currency/order, idempotency and atomic updates. For unconfigured providers, expose a clear disabled/pending status and safe manual/offline payment option rather than pretending online payment works. Never invent a provider API or claim a real payment integration without official docs and sandbox credentials; keep provider setup disabled/pending until configured. Never include real credentials, binaries, vendor, node_modules, .git, .env, or generated secrets. Include meaningful feature tests for storefront, admin/subadmin authorization, products/JSON chat, Telegram settings, Google OAuth, checkout, and payment webhooks. CI must run composer validate, composer install, php -l and php artisan test. Do not execute generated PHP on this builder server. Return complete files only, no markdown fences.";
-    // Generate the Laravel application in three bounded modules. This avoids
-    // truncating a complete application at Gemini's single-response token limit.
+    // Generate the Laravel application in eight small bounded modules to avoid
+    // truncating large JSON responses at provider output-token limits.
+    // Keep each response bounded so Gemini/Groq cannot truncate a whole application batch.
     $generationBatches = [
         [
-            'name'=>'framework_storefront',
+            'name'=>'framework_core',
             'paths'=>[
                 'composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
                 'routes/web.php','routes/auth.php','config/auth.php','config/database.php','config/services.php',
-                '.env.example','README.md','.github/workflows/laravel-validate.yml',
-                'database/migrations/*','database/seeders/*',
-                'app/Models/*','app/Http/Requests/*','app/Http/Middleware/EnsureRole.php',
-                'app/Policies/OrderPolicy.php',
+                '.env.example','README.md','.github/workflows/laravel-validate.yml'
+            ],
+            'scope'=>'Build the installable Laravel framework skeleton, production configuration, routing, auth foundation, documentation and CI workflow.'
+        ],
+        [
+            'name'=>'database_and_models',
+            'paths'=>[
+                'database/migrations/*','database/seeders/*','app/Models/*',
+                'app/Http/Requests/*','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'
+            ],
+            'scope'=>'Build all MySQL/PostgreSQL-compatible migrations, secure owner seed/setup, Eloquent models, form requests, role middleware and order authorization policy. Match framework and route contracts.'
+        ],
+        [
+            'name'=>'storefront_and_checkout',
+            'paths'=>[
                 'app/Http/Controllers/StoreController.php','app/Http/Controllers/CartController.php',
                 'app/Http/Controllers/CheckoutController.php',
                 'resources/views/layouts/*','resources/views/store/*','resources/views/cart/*',
                 'resources/views/checkout/*'
             ],
-            'scope'=>'Build the Laravel framework skeleton, all database migrations and seeders, models, auth/routing/configuration, storefront, customer account basics, cart and secure checkout.'
+            'scope'=>'Build the responsive storefront, product search/details, customer account basics, cart, stock-safe checkout and order history views/controllers.'
         ],
         [
-            'name'=>'owner_admin',
+            'name'=>'admin_controllers',
             'paths'=>[
-                'app/Http/Controllers/Admin/*.php','app/Http/Controllers/Auth/GoogleController.php',
+                'app/Http/Controllers/Admin/*.php','app/Http/Controllers/Auth/GoogleController.php'
+            ],
+            'scope'=>'Build owner admin controllers and restricted sub-admin workflows, server-side authorization, catalog, orders, customers, categories, inventory, settings and safe Google OAuth handling.'
+        ],
+        [
+            'name'=>'admin_views',
+            'paths'=>[
                 'resources/views/admin/*.blade.php','resources/views/admin/products/*.blade.php',
                 'resources/views/admin/orders/*.blade.php','resources/views/admin/categories/*.blade.php',
                 'resources/views/admin/inventory/*.blade.php','resources/views/admin/subadmins/*.blade.php',
                 'resources/views/admin/customers/*.blade.php','resources/views/admin/settings/*.blade.php'
             ],
-            'scope'=>'Build the complete owner admin and least-privilege sub-admin modules, authorization, catalog, orders, customers, inventory, branding/theme, shipping/tax, Google OAuth settings and their views. Integrate with the exact models, migrations, routes and service contracts implied by the application brief.'
+            'scope'=>'Build complete responsive owner/admin and sub-admin Blade screens for products, orders, categories, inventory, customers, staff, branding, shipping, taxes, Telegram, Google OAuth and payment configuration.'
         ],
         [
-            'name'=>'integrations_tests_assets',
+            'name'=>'integrations',
             'paths'=>[
                 'app/Services/*.php','app/Services/Payments/*.php',
                 'app/Http/Controllers/Chat/ProductChatController.php',
                 'app/Http/Controllers/PaymentWebhookController.php',
-                'resources/views/components/*','resources/css/app.css','resources/js/app.js',
-                'tests/Feature/*'
+                'resources/views/components/*'
             ],
-            'scope'=>'Build Telegram, Gemini product assistant, secure provider-neutral payment adapters/webhooks, product chat UI, assets, and comprehensive feature tests for every required workflow. Ensure all service/controller/view contracts match the files requested in earlier batches.'
+            'scope'=>'Build Telegram notifications, Gemini product assistant, product chat, provider-neutral payment adapters and secure idempotent webhook handling. Keep missing integrations disabled and never fake success.'
+        ],
+        [
+            'name'=>'frontend_assets',
+            'paths'=>['resources/css/app.css','resources/js/app.js'],
+            'scope'=>'Build responsive accessible storefront/admin styling and browser interactions matching the Blade screens. Do not add external scripts or remove required functionality.'
+        ],
+        [
+            'name'=>'feature_tests',
+            'paths'=>['tests/Feature/*'],
+            'scope'=>'Build meaningful Laravel feature tests for storefront, admin/sub-admin authorization, product assistant, payment webhook, Google OAuth, Telegram settings, checkout, payment gateway and category/inventory workflows. Tests must match the previously generated routes, models and services.'
         ]
     ];
     $allGeneratedFiles = [];
@@ -717,7 +744,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             "route names, model relationships, database columns and service method signatures across batches. ".
             "No placeholders, TODOs, fake integration success, real credentials or binary files.\\nUSER REQUEST:\\n".$prompt;
         try {
-            $aiResult = ai_request_json($batchText, 22000);
+            $aiResult = ai_request_json($batchText, 16000);
         } catch (Throwable $e) {
             respond(502, ['error'=>'AI generation failed during '.$batch['name'].' batch.','detail'=>$e->getMessage()]);
         }
