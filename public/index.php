@@ -104,7 +104,15 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             }
 
             $message = (string)($answer['error']['message'] ?? ($err ?: 'HTTP '.$code));
-            $message = preg_replace('/(?i)(sk-[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,})/', '[REDACTED]', $message);
+            // Never echo even a provider-masked API key fragment into Nira or Render logs.
+            if ($provider['name'] === 'OpenAI' && $code === 401) {
+                $message = 'Authentication failed. Check or replace OPENAI_API_KEY in the Builder Render Environment.';
+            } elseif ($provider['name'] === 'Gemini' && in_array($code, [429, 503], true)) {
+                $message = 'Gemini is temporarily overloaded (HTTP '.$code.'). Retry later or configure an available Gemini model.';
+            } else {
+                $message = preg_replace('/(?i)(incorrect api key provided:\\s*)[^.]+/', '$1[REDACTED]', $message);
+                $message = preg_replace('/(?i)(sk-(?:proj-)?[A-Za-z0-9_*.-]{8,}|AIza[0-9A-Za-z_*-]{20,})/', '[REDACTED]', $message);
+            }
             $errors[] = $provider['name'].' HTTP '.$code.': '.substr($message, 0, 240);
             $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true);
             if (!$retryable || $attempt === 3) break;
