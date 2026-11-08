@@ -189,13 +189,19 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 if (in_array($finishReason, ['MAX_TOKENS','length'], true)) {
                     $sawOutputLimit = true;
                     $errors[] = $provider['name'].' '.$model.' hit the output-token limit'.$detail;
-                    error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=max_tokens attempt='.$attempt.$detail);
+                    error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=max_tokens attempt='.$attempt.' output_tokens='.$attemptOutputTokens.$detail);
+                    if ($attempt < 3) {
+                        $requestPrompt = $prompt."\n\nCOMPACT OUTPUT RETRY: The previous response was cut off by the output-token limit. Return the same complete JSON schema, but make every file concise and remove comments, examples, decorative text, and unnecessary whitespace. Never return partial JSON.";
+                        sleep(1);
+                        continue;
+                    }
                     break;
                 }
                 if (is_array($decoded) && !array_is_list($decoded)) {
                     error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=success attempt='.$attempt.' response_chars='.strlen($text));
                     return ['text'=>json_encode($decoded, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'provider'=>$provider['name'],'model'=>$model,'finish_reason'=>$finishReason];
                 }
+                $sawJsonFormatFailure = true;
                 $errors[] = $provider['name'].' '.$model.' returned invalid or incomplete JSON'.$detail;
                 error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=invalid_json attempt='.$attempt.$detail);
                 $hitLimit = in_array($finishReason, ['MAX_TOKENS','length'], true);
@@ -1086,7 +1092,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         $compactNote='';
         for($batchTry=1;;$batchTry++) {
             try {
-                $outputTokens=max(4000,min(10000,(int)envv('NIRA_BATCH_OUTPUT_TOKENS','8000')));
+                $outputTokens=max(3000,min(8000,(int)envv('NIRA_BATCH_OUTPUT_TOKENS','6000')));
                 $aiResult=ai_request_json($batchText.$compactNote,$outputTokens);
                 break;
             } catch(AiOutputLimitException|AiJsonFormatException $e) {
