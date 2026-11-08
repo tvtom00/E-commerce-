@@ -52,8 +52,14 @@ function ai_retry_delay_seconds(mixed $answer, int $default): int {
         foreach (($answer['error']['details'] ?? []) as $detail) {
             if (is_array($detail) && isset($detail['retryDelay']) && is_string($detail['retryDelay'])
                 && preg_match('/^(\d+(?:\.\d+)?)s$/', $detail['retryDelay'], $m)) {
-                return max(1, min(60, (int)ceil((float)$m[1])));
+                return max(1, min(120, (int)ceil((float)$m[1]) + 2));
             }
+        }
+        // Groq reports TPM exhaustion in error.message, e.g.:
+        // "Please try again in 36.0975s". Respect its rolling-window reset.
+        $message = (string)($answer['error']['message'] ?? '');
+        if (preg_match('/try again in\s+(\d+(?:\.\d+)?)\s*s/i', $message, $m)) {
+            return max(1, min(120, (int)ceil((float)$m[1]) + 2));
         }
     }
     return $default;
@@ -230,7 +236,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 500));
             $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true) || $jsonFormatFailure;
             if (!$retryable || $attempt === 3) break;
-            sleep($jsonFormatFailure ? min(4, 2 ** $attempt) : ai_retry_delay_seconds($answer, $code === 429 ? 10 : 4));
+            sleep($jsonFormatFailure ? min(4, 2 ** $attempt) : ai_retry_delay_seconds($answer, $code === 429 ? 45 : ($code === 503 ? 15 : 4)));
         }
     }
     $failureSummary = 'All configured AI providers failed. '.implode(' | ', $errors);
