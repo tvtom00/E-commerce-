@@ -7,6 +7,12 @@ const MAX_FILE_BYTES = 120000;
 const MAX_TOTAL_BYTES = 3000000;
 $GLOBALS['NIRA_SSE_MODE'] = false;
 
+function sse_keepalive(): void {
+    if (empty($GLOBALS['NIRA_SSE_MODE'])) return;
+    echo ": keepalive\n\n";
+    flush();
+}
+
 function progress_event(string $event, array $data): void {
     if (empty($GLOBALS['NIRA_SSE_MODE'])) return;
     echo 'event: '.$event."\n".'data: '.json_encode($data, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n\n";
@@ -17,7 +23,10 @@ function progress_event(string $event, array $data): void {
 function respond(int $status, array $data): never {
     http_response_code($status);
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
-        progress_event('error', ['status'=>$status] + $data);
+        $resume = [];
+        if (!empty($GLOBALS['NIRA_RESUME_ID'])) $resume['resume_id'] = $GLOBALS['NIRA_RESUME_ID'];
+        if (!empty($GLOBALS['NIRA_RESUME_STORAGE'])) $resume['resume_storage'] = $GLOBALS['NIRA_RESUME_STORAGE'];
+        progress_event('error', ['status'=>$status] + $resume + $data);
     } else {
         header('Content-Type: application/json; charset=utf-8');
         echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -33,6 +42,33 @@ function envv(string $key, string $default = ''): string {
 function allow_long_execution(): void {
     if (function_exists('set_time_limit')) @set_time_limit(0);
     @ini_set('max_execution_time', '0');
+}
+
+final class AiOutputLimitException extends RuntimeException {}
+final class AiJsonFormatException extends RuntimeException {}
+
+function ai_retry_delay_seconds(mixed $answer, int $default): int {
+    if (is_array($answer)) {
+        foreach (($answer['error']['details'] ?? []) as $detail) {
+            if (is_array($detail) && isset($detail['retryDelay']) && is_string($detail['retryDelay'])
+                && preg_match('/^(\d+(?:\.\d+)?)s$/', $detail['retryDelay'], $m)) {
+                return max(1, min(60, (int)ceil((float)$m[1])));
+            }
+        }
+    }
+    return $default;
+}
+
+function sse_curl_progress(): int {
+    if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
+        $now = microtime(true);
+        $last = (float)($GLOBALS['NIRA_SSE_LAST_KEEPALIVE'] ?? 0);
+        if ($now - $last >= 15) {
+            sse_keepalive();
+            $GLOBALS['NIRA_SSE_LAST_KEEPALIVE'] = $now;
+        }
+    }
+    return 0;
 }
 
 
@@ -65,6 +101,8 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
         $providers
     )));
     $errors = [];
+    $sawOutputLimit = false;
+    $sawJsonFormatFailure = false;
     foreach ($providers as $provider) {
         for ($attempt = 1; $attempt <= 2; $attempt++) {
             if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
@@ -85,6 +123,12 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                     'contents'=>[['parts'=>[['text'=>$prompt]]]],
                     'generationConfig'=>['responseMimeType'=>'application/json','maxOutputTokens'=>$maxOutputTokens]
                 ];
+                // Gemini 3.x uses thinkingLevel; a low level preserves more of the output budget for code.
+                $thinkingLevel = strtolower(envv('GEMINI_THINKING_LEVEL', 'low'));
+                $allowedThinkingLevels = str_contains($model, '3.8-flash')
+                    ? ['low','medium','high'] : ['minimal','low','medium','high'];
+                if (!in_array($thinkingLevel, $allowedThinkingLevels, true)) $thinkingLevel = 'low';
+                $payload['generationConfig']['thinkingConfig'] = ['thinkingLevel'=>$thinkingLevel];
             }
             $ch = curl_init($url);
             curl_setopt_array($ch, [
@@ -93,7 +137,11 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 CURLOPT_POSTFIELDS=>json_encode($payload, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
                 CURLOPT_RETURNTRANSFER=>true,
                 CURLOPT_CONNECTTIMEOUT=>15,
-                CURLOPT_TIMEOUT=>180
+                CURLOPT_TIMEOUT=>180,
+                CURLOPT_NOPROGRESS=>false,
+                CURLOPT_XFERINFOFUNCTION=>static function($handle, $downloadTotal, $downloaded, $uploadTotal, $uploaded): int {
+                    return sse_curl_progress();
+                }
             ]);
             $body = curl_exec($ch);
             $err = curl_error($ch);
@@ -127,6 +175,12 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                         }
                     }
                 }
+                if (in_array($finishReason, ['MAX_TOKENS','length'], true)) {
+                    $sawOutputLimit = true;
+                    $errors[] = $provider['name'].' '.$model.' hit the output-token limit'.$detail;
+                    error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=max_tokens attempt='.$attempt.$detail);
+                    break;
+                }
                 if (is_array($decoded)) {
                     error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=success attempt='.$attempt.' response_chars='.strlen($text));
                     return ['text'=>json_encode($decoded, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'provider'=>$provider['name'],'model'=>$model,'finish_reason'=>$finishReason];
@@ -134,11 +188,15 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 $detail = $finishReason !== '' ? ' (finishReason='.$finishReason.', response_chars='.strlen($text).')' : ' (response_chars='.strlen($text).')';
                 $errors[] = $provider['name'].' '.$model.' returned invalid or incomplete JSON'.$detail;
                 error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=invalid_json attempt='.$attempt.$detail);
-                if ($attempt < 2) continue;
+                $hitLimit = in_array($finishReason, ['MAX_TOKENS','length'], true);
+                if ($hitLimit) $sawOutputLimit = true;
+                if ($attempt < 2 && !$hitLimit) continue;
                 break;
             }
 
             $message = (string)($answer['error']['message'] ?? ($err ?: 'HTTP '.$code));
+            $failedGeneration = (string)($answer['error']['failed_generation'] ?? '');
+            if ($failedGeneration !== '') $message .= ' | failed_generation: '.substr($failedGeneration, 0, 300);
             if ($provider['name'] === 'OpenAI' && $code === 401) {
                 $message = 'Authentication failed. Check OPENAI_API_KEY in the Builder Render Environment.';
             } elseif ($provider['name'] === 'Groq' && $code === 401) {
@@ -149,14 +207,24 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 $message = preg_replace('/(?i)(incorrect api key provided:\\s*)[^.]+/', '$1[REDACTED]', $message);
                 $message = preg_replace('/(?i)(sk-(?:proj-)?[A-Za-z0-9_*.-]{8,}|AIza[0-9A-Za-z_*-]{20,})/', '[REDACTED]', $message);
             }
-            $errors[] = $provider['name'].' '.$model.' HTTP '.$code.': '.substr($message, 0, 240);
-            error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 160));
+            $message = preg_replace('/(?i)(sk-(?:proj-)?[A-Za-z0-9_*.-]{8,}|AIza[0-9A-Za-z_*-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,})/', '[REDACTED]', $message);
+            if ($code === 400 && preg_match('/failed to generate json|json_validate_failed|generated json does not match/i', $message)) {
+                $sawJsonFormatFailure = true;
+            }
+            if ($code === 400 && preg_match('/max_tokens|max_completion_tokens|token limit/i', $message)) {
+                $sawOutputLimit = true;
+            }
+            $errors[] = $provider['name'].' '.$model.' HTTP '.$code.': '.substr($message, 0, 500);
+            error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 500));
             $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true);
             if (!$retryable || $attempt === 2) break;
-            sleep($code === 429 ? 10 : 4);
+            sleep(ai_retry_delay_seconds($answer, $code === 429 ? 10 : 4));
         }
     }
-    throw new RuntimeException('All configured AI providers failed. '.implode(' | ', $errors));
+    $failureSummary = 'All configured AI providers failed. '.implode(' | ', $errors);
+    if ($sawOutputLimit) throw new AiOutputLimitException($failureSummary);
+    if ($sawJsonFormatFailure) throw new AiJsonFormatException($failureSummary);
+    throw new RuntimeException($failureSummary);
 }
 
 function clean_name(string $name): string {
@@ -370,7 +438,7 @@ function validate_laravel_project(array $rawFiles): array {
             if (stripos($files[$path], $needle) === false) throw new RuntimeException('A Laravel module is missing required behavior: '.$path);
         }
     }
-    $all = implode("\\n", array_values($files));
+    $all = implode("\n", array_values($files));
     if (!str_contains($all, 'Crypt::encryptString') || !str_contains($all, 'Crypt::decryptString')) {
         throw new RuntimeException('Payment and integration secrets must be encrypted at rest.');
     }
@@ -560,6 +628,132 @@ function build_static_preview(array $files, string $viewPath): string {
     return substr($html, 0, 60000);
 }
 
+function checkpoint_local_path(string $resumeId): string {
+    $root = rtrim(envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated'), '/').'/checkpoints';
+    if (!is_dir($root) && !mkdir($root, 0750, true) && !is_dir($root)) throw new RuntimeException('Could not initialize local checkpoint storage.');
+    return $root.'/'.$resumeId.'.json';
+}
+
+function checkpoint_repository(string $resumeId, string $token): array {
+    if (!preg_match('/^[a-f0-9]{24}$/', $resumeId)) throw new RuntimeException('Invalid resume checkpoint ID.');
+    $user=github_api('GET','/user',$token); $owner=(string)($user['login']??'');
+    if($owner==='') throw new RuntimeException('Could not identify GitHub checkpoint owner.');
+    $repo='nira-resume-'.$resumeId;
+    try {
+        $data=github_api('GET','/repos/'.$owner.'/'.$repo,$token);
+        if(empty($data['private'])) throw new RuntimeException('Checkpoint repository must be private.');
+    } catch(Throwable $e) {
+        $data=github_api('POST','/user/repos',$token,['name'=>$repo,'private'=>true,'auto_init'=>true,
+            'description'=>'Private Nira AI Builder generation checkpoint']);
+    }
+    return ['owner'=>$owner,'repo'=>$repo,'branch'=>(string)($data['default_branch']??'main')];
+}
+
+function checkpoint_empty(): array {
+    return ['files'=>[],'file_shas'=>[],'completed_batch'=>-1,'preview_id'=>bin2hex(random_bytes(12))];
+}
+
+function checkpoint_load_local(string $resumeId, string $promptHash): array {
+    $path=checkpoint_local_path($resumeId);
+    if(!is_file($path)) return checkpoint_empty();
+    $saved=json_decode((string)file_get_contents($path),true);
+    if(!is_array($saved)||!hash_equals($promptHash,(string)($saved['prompt_hash']??''))) throw new RuntimeException('Resume ID does not match this exact project prompt.');
+    $files=$saved['files']??[];
+    if(!is_array($files)||count($files)>MAX_OUTPUT_FILES) throw new RuntimeException('Saved checkpoint file list is invalid.');
+    $total=0;
+    foreach($files as $p=>$content) {
+        if(!is_string($p)||!is_string($content)) throw new RuntimeException('Saved checkpoint contains invalid file data.');
+        clean_name($p); if(strlen($content)>MAX_FILE_BYTES) throw new RuntimeException('Saved checkpoint contains an oversized file.');
+        $total+=strlen($content);
+    }
+    if($total>MAX_TOTAL_BYTES) throw new RuntimeException('Saved checkpoint exceeds the project source limit.');
+    return ['files'=>$files,'file_shas'=>[],'completed_batch'=>(int)($saved['completed_batch']??-1),
+        'preview_id'=>(string)($saved['preview_id']??bin2hex(random_bytes(12)))];
+}
+
+function checkpoint_load_github(array $cp, string $hash, string $token): array {
+    $owner=$cp['owner']; $repo=$cp['repo']; $branch=$cp['branch'];
+    $ref=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/ref/heads/'.rawurlencode($branch),$token);
+    $head=(string)($ref['object']['sha']??''); if($head==='') return checkpoint_empty();
+    $commit=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/commits/'.$head,$token);
+    $tree=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/trees/'.$commit['tree']['sha'].'?recursive=1',$token);
+    $metaSha='';
+    foreach(($tree['tree']??[]) as $item) if(($item['path']??'')==='.nira-checkpoint.json') {$metaSha=(string)$item['sha'];break;}
+    if($metaSha==='') return checkpoint_empty();
+    $blob=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/blobs/'.$metaSha,$token);
+    $metaText=base64_decode((string)($blob['content']??''),true);
+    $meta=is_string($metaText)?json_decode($metaText,true):null;
+    if(!is_array($meta)||!hash_equals($hash,(string)($meta['prompt_hash']??''))) throw new RuntimeException('Resume ID does not match this exact project prompt.');
+    $fileShas=$meta['files']??[];
+    if(!is_array($fileShas)||count($fileShas)>MAX_OUTPUT_FILES) throw new RuntimeException('Saved checkpoint metadata is invalid.');
+    $files=[]; $total=0;
+    foreach($fileShas as $p=>$sha) {
+        if(!is_string($p)||!is_string($sha)) continue;
+        clean_name($p);
+        $b=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/blobs/'.$sha,$token);
+        $content=base64_decode((string)($b['content']??''),true);
+        if(!is_string($content)||strlen($content)>MAX_FILE_BYTES) throw new RuntimeException('Saved checkpoint file is invalid.');
+        $total+=strlen($content); if($total>MAX_TOTAL_BYTES) throw new RuntimeException('Saved checkpoint exceeds the project source limit.');
+        $files[$p]=$content;
+    }
+    return ['files'=>$files,'file_shas'=>$fileShas,'completed_batch'=>(int)($meta['completed_batch']??-1),
+        'preview_id'=>(string)($meta['preview_id']??bin2hex(random_bytes(12)))];
+}
+
+function checkpoint_save_local(string $id, array $files, int $batch, string $previewId, string $hash, string $project): void {
+    $path=checkpoint_local_path($id);
+    $json=json_encode(['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,
+        'preview_id'=>$previewId,'files'=>$files,'updated_at'=>gmdate('c')],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+    if(!is_string($json)) throw new RuntimeException('Could not encode local generation checkpoint.');
+    $tmp=$path.'.tmp';
+    if(file_put_contents($tmp,$json,LOCK_EX)===false||!rename($tmp,$path)) { @unlink($tmp); throw new RuntimeException('Could not save local generation checkpoint.'); }
+}
+
+function checkpoint_save_github(array $cp, array $newFiles, array $fileShas, int $batch,
+    string $previewId, string $hash, string $project, string $token): array {
+    $owner=$cp['owner']; $repo=$cp['repo']; $branch=$cp['branch'];
+    $ref=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/ref/heads/'.rawurlencode($branch),$token);
+    $parent=(string)($ref['object']['sha']??'');
+    $pc=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/commits/'.$parent,$token);
+    $items=[];
+    foreach($newFiles as $path=>$content) {
+        $blob=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/blobs',$token,['content'=>$content,'encoding'=>'utf-8']);
+        $fileShas[$path]=$blob['sha']; $items[]=['path'=>$path,'mode'=>'100644','type'=>'blob','sha'=>$blob['sha']];
+    }
+    $meta=['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,'preview_id'=>$previewId,
+        'files'=>$fileShas,'updated_at'=>gmdate('c')];
+    $mb=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/blobs',$token,['content'=>json_encode($meta,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'encoding'=>'utf-8']);
+    $items[]=['path'=>'.nira-checkpoint.json','mode'=>'100644','type'=>'blob','sha'=>$mb['sha']];
+    $tree=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/trees',$token,['base_tree'=>$pc['tree']['sha'],'tree'=>$items]);
+    $commit=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/commits',$token,['message'=>'Nira checkpoint batch '.($batch+1),'tree'=>$tree['sha'],'parents'=>[$parent]]);
+    github_api('PATCH','/repos/'.$owner.'/'.$repo.'/git/refs/heads/'.rawurlencode($branch),$token,['sha'=>$commit['sha'],'force'=>false]);
+    return $fileShas;
+}
+
+function generation_contract_context(array $files, string $batchName): string {
+    $wanted=match($batchName) {
+        'models_and_policies'=>['database/migrations/'],
+        'storefront_controllers'=>['routes/web.php','database/migrations/','app/Models/'],
+        'storefront_views'=>['routes/web.php','app/Models/','app/Http/Controllers/StoreController.php','app/Http/Controllers/CartController.php','app/Http/Controllers/CheckoutController.php'],
+        'admin_controllers'=>['routes/web.php','app/Models/','app/Http/Requests/','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'],
+        'admin_views_catalog','admin_views_operations'=>['routes/web.php','app/Models/','app/Http/Controllers/Admin/','resources/views/layouts/app.blade.php'],
+        'integrations'=>['routes/web.php','database/migrations/','app/Models/','app/Http/Controllers/Admin/SettingsController.php'],
+        'feature_tests'=>['routes/','database/migrations/','app/Models/','app/Http/Controllers/','app/Http/Middleware/','app/Policies/','app/Services/'],
+        default=>[]
+    };
+    if(!$wanted) return '';
+    $out="\n\nPROJECT CONTRACT FROM COMPLETED BATCHES (read-only; follow these exact names and schemas):\n"; $used=0;
+    foreach($files as $path=>$content) {
+        $include=false;
+        foreach($wanted as $selector) if($path===$selector||(str_ends_with($selector,'/')&&str_starts_with($path,$selector))) {$include=true;break;}
+        if(!$include) continue;
+        $entry="\n--- ".$path." ---\n".substr($content,0, min(strlen($content),5000));
+        if($used+strlen($entry)>24000) break;
+        $out.=$entry; $used+=strlen($entry);
+    }
+    return $used>0?$out:'';
+}
+
 function save_preview_snapshot(string $id, array $files): void {
     if (!preg_match('/^[a-f0-9]{24}$/', $id)) return;
     $root = dirname(rtrim(envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated'), '/')).'/previews';
@@ -586,19 +780,20 @@ button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#c
 .preview-tabs{display:flex;gap:8px;margin:12px 0}.preview-tabs button{font-size:14px;padding:9px 14px}
 </style><main><h1>Nira AI Website Builder</h1><p>আপনার ওয়েবসাইটের ধরন, পেজ, ডিজাইন ও ফিচার লিখুন। Nira AI একটি প্রজেক্ট ZIP তৈরি করবে।</p>
 <label>ওয়েবসাইটের নির্দেশনা</label><textarea id="prompt" placeholder="যেমন: আধুনিক e-commerce website, product catalog, cart, admin dashboard, Bangla/English..."></textarea>
-<label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40">\n<label>Access token (যদি সার্ভারে সেট করা থাকে)</label><input id="token" type="password" autocomplete="off" placeholder="NIRA_BUILDER_TOKEN">
+<label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40"><label>Access token (যদি সার্ভারে সেট করা থাকে)</label><input id="token" type="password" autocomplete="off" placeholder="NIRA_BUILDER_TOKEN">
 <button id="go">Generate website ZIP</button><div id="status"></div><section id="preview"><h2>Static preview (safe mode)</h2><p class="small">এটি generated Blade/CSS থেকে তৈরি নিরাপদ static preview; Laravel/PHP বা generated JavaScript এখানে execute হয় না।</p><div class="preview-tabs"><button id="storeTab" type="button">Storefront</button><button id="adminTab" type="button">Admin Panel</button></div><iframe id="previewFrame" title="Website preview" sandbox=""></iframe></section><section id="revise" style="margin-top:24px;border-top:1px solid #344464;padding-top:20px"><h2>Existing draft design edit</h2><p class="small">Private Nira draft-এর owner ও repository name দিয়ে লিখুন কী পরিবর্তন চান। শুধু Blade/CSS/JS UI বদলাবে; backend/payment/security code অপরিবর্তিত থাকবে।</p><label>GitHub owner</label><input id="revOwner" placeholder="GitHub owner"><label>Private draft repository</label><input id="revRepo" placeholder="repository-name"><label>কী পরিবর্তন করতে চান?</label><textarea id="revInstruction" style="min-height:90px" placeholder="যেমন: সব primary button নীল করো, storefront header আরও modern করো..."></textarea><button id="revGo" type="button">Draft-এ পরিবর্তন করো এবং Preview দেখাও</button><div id="revStatus" class="small"></div></section><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
-b.onclick=async()=>{b.disabled=true;s.textContent='প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
-const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value})});
+const resumeStoreKey='niraBuilderResumeV2';let resumeData=null;try{resumeData=JSON.parse(localStorage.getItem(resumeStoreKey)||'null')}catch(e){resumeData=null}let resumeId=resumeData?.id||null;
+b.onclick=async()=>{const requestKey=document.getElementById('name').value.trim()+'|'+document.getElementById('prompt').value.trim();if(resumeData&&resumeData.key!==requestKey){resumeData=null;resumeId=null;localStorage.removeItem(resumeStoreKey)}b.disabled=true;s.textContent=resumeId?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে...':'প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
+const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value,resume_id:resumeId})});
 if(!r.ok && !r.body)throw Error('Generation failed');
 const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
 while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
 for(const block of blocks){const ev=(block.match(/^event: (.+)$/m)||[])[1],data=(block.match(/^data: (.+)$/m)||[])[1];if(!data)continue;const j=JSON.parse(data);
-if(ev==='progress'){s.textContent=j.message+'\\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
-if(ev==='error')throw Error(j.error||'Generation failed');
-if(ev==='complete')completed=j;
+if(ev==='progress'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}s.textContent=j.message+'\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
+if(ev==='error'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}throw Error((j.error||'Generation failed')+(j.detail?'\nকারণ: '+j.detail:'')+(resumeId?'\nআবার Generate চাপলে শেষ সফল ব্যাচ থেকে চলবে.':''));}
+if(ev==='complete'){completed=j;resumeId=null;resumeData=null;localStorage.removeItem(resumeStoreKey);}
 }}
 if(!completed)throw Error('Builder connection ended before completion.');
 s.textContent='তৈরি হয়েছে: '+completed.files+'টি ফাইল। '+(completed.github?'Private GitHub draft প্রস্তুত।':'');
@@ -656,9 +851,16 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     allow_long_execution();
     $GLOBALS['NIRA_SSE_MODE'] = (($_GET['stream'] ?? '') === '1');
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
+        while (ob_get_level() > 0) @ob_end_flush();
+        @ini_set('zlib.output_compression', '0');
+        @ini_set('output_buffering', 'off');
+        @ini_set('implicit_flush', '1');
+        ob_implicit_flush(true);
+        $GLOBALS['NIRA_SSE_LAST_KEEPALIVE'] = microtime(true);
         header('Content-Type: text/event-stream; charset=utf-8');
         header('Cache-Control: no-cache, no-transform');
         header('X-Accel-Buffering: no');
+        header('Connection: keep-alive');
         progress_event('progress', ['stage'=>'request_received','percent'=>2,'message'=>'অনুরোধ যাচাই করা হচ্ছে']);
     }
     $raw = file_get_contents('php://input', false, null, 0, MAX_REQUEST_BYTES + 1);
@@ -666,14 +868,19 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $input = json_decode($raw ?: '', true);
     $prompt = trim((string)($input['prompt'] ?? ''));
     $name = preg_replace('/[^a-zA-Z0-9_-]/', '-', (string)($input['name'] ?? 'website'));
+    $resumeId = (string)($input['resume_id'] ?? '');
+    if ($resumeId !== '' && !preg_match('/^[a-f0-9]{24}$/', $resumeId)) respond(422, ['error'=>'Invalid resume checkpoint ID.']);
+    if ($resumeId === '') $resumeId = bin2hex(random_bytes(12));
+    $promptHash = hash('sha256', 'builder-checkpoint-schema-2-11-batches'.PHP_EOL.$name.PHP_EOL.$prompt);
+    $GLOBALS['NIRA_RESUME_ID'] = $resumeId;
     if (strlen($prompt) < 20) respond(422, ['error'=>'কমপক্ষে ২০ অক্ষরের বিস্তারিত নির্দেশনা দিন।']);
     if (strlen($prompt) > 9000) respond(422, ['error'=>'নির্দেশনা খুব বড়।']);
     if (envv('OPENAI_API_KEY') === '' && envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) === '' && envv('GROQ_API_KEY') === '') {
         respond(503, ['error'=>'Server setup incomplete: configure OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in Render Environment.']);
     }
     $system = "You are Nira's complete Laravel E-commerce application generator. Return ONLY valid JSON: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file text\"}]}. MANDATORY: generate a complete, installable Laravel Framework application, never Core PHP, plain PHP, WordPress, Node-only, or a static mockup. Require laravel/framework and a supported PHP version in composer.json. Generate up to 100 files, each <=120KB and total source <=3MB. Every required feature must be implemented end-to-end across routes, validation, authorization, controllers, services, database migrations, Blade views, and feature tests; a view or placeholder class alone does not count. Include the complete Laravel app: artisan, bootstrap/app.php, public/index.php and .htaccess, routes/web.php and auth.php, MySQL config and .env.example, models, controllers, middleware, policies, requests, migrations, seeders, Blade storefront/admin views, CSS/JS, feature tests, README, and .github/workflows/laravel-validate.yml. Required modules: responsive customer-specific storefront, search, product detail, cart, checkout, customer accounts/order history, owner admin, product/category/inventory CRUD, orders/customers, sub-admin restricted to order management with server-side authorization, JSON product attributes, Gemini product description JSON generation and live product chat, Telegram notifications/settings, Google OAuth configuration, provider-neutral configurable payment adapter and secure webhook. Derive store name, niche, catalog, currency, colors, layout, language and brand from the user's brief; do not hardcode a demo shop. Use MySQL for production and include cPanel installation instructions. Include migrations for users, products, categories, product images, carts/cart items (or secure session cart), orders, order items, inventory movements, settings, roles/permissions, payment transactions, and audit events; include seeders that create the first owner securely from environment variables or a one-time setup flow. Store money as integer minor units or fixed-precision decimals, use database transactions and row locks for stock/order changes, prevent overselling, validate shipping/tax totals server-side, and never trust client-submitted prices. Implement CSRF protection, authentication throttling, authorization policies, form requests, output escaping, upload MIME/size validation, and secure session/cookie defaults. The owner admin must be able to configure store name/logo/colors/theme/layout/currency/language/contact details, catalog, stock, shipping, and taxes. All buyer-specific integrations must be configured from dedicated owner-only Admin Panel screens without routine source-code or .env edits. Telegram settings must include bot token, chat ID, per-event notification toggles, enable/disable, test-message action and explicit Not configured/Configured/Connection failed status; missing credentials keep it disabled and no fake success is allowed. Google OAuth settings must include Client ID, Client Secret, Redirect/Callback URL, enable/disable and setup status; missing credentials keep OAuth disabled while ordinary login continues. Payment settings must allow each provider to be independently configured with display name, enabled/disabled, sandbox/live mode, API endpoint, merchant/account ID, API key, API secret, signing/webhook secret, currency, return URL and webhook URL. Encrypt secrets at rest, mask them, preserve saved values when blank secret fields are submitted, and never expose them to browser JS, HTML responses, logs or audit metadata. Show actionable validation and connection-test results. Missing or undocumented credentials leave integrations inactive/pending, never simulate successful connections or payments. The sub-admin must only view/update permitted order fields; enforce this on every route and policy. Encrypt integration/payment credentials at rest, mask secrets in admin UI, never expose secrets to browser JS or logs. Payment adapters must verify webhook signatures server-side, amount/currency/order, idempotency and atomic updates. For unconfigured providers, expose a clear disabled/pending status and safe manual/offline payment option rather than pretending online payment works. Never invent a provider API or claim a real payment integration without official docs and sandbox credentials; keep provider setup disabled/pending until configured. Never include real credentials, binaries, vendor, node_modules, .git, .env, or generated secrets. Include meaningful feature tests for storefront, admin/subadmin authorization, products/JSON chat, Telegram settings, Google OAuth, checkout, and payment webhooks. CI must run composer validate, composer install, php -l and php artisan test. Do not execute generated PHP on this builder server. Return complete files only, no markdown fences.";
-    // Generate the Laravel application in eight small bounded modules to avoid
-    // truncating large JSON responses at provider output-token limits.
+    // Generate the Laravel application in eleven bounded modules to reduce
+    // truncation risk and keep each provider response within a practical output budget.
     // Keep each response bounded so Gemini/Groq cannot truncate a whole application batch.
     $generationBatches = [
         [
@@ -686,22 +893,27 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             'scope'=>'Build the installable Laravel framework skeleton, production configuration, routing, auth foundation, documentation and CI workflow.'
         ],
         [
-            'name'=>'database_and_models',
-            'paths'=>[
-                'database/migrations/*','database/seeders/*','app/Models/*',
-                'app/Http/Requests/*','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'
-            ],
-            'scope'=>'Build all MySQL/PostgreSQL-compatible migrations, secure owner seed/setup, Eloquent models, form requests, role middleware and order authorization policy. Match framework and route contracts.'
+            'name'=>'database_migrations',
+            'paths'=>['database/migrations/*','database/seeders/*'],
+            'scope'=>'Build all MySQL/PostgreSQL-compatible migrations and secure owner seed/setup. Match framework and route contracts.'
         ],
         [
-            'name'=>'storefront_and_checkout',
+            'name'=>'models_and_policies',
+            'paths'=>['app/Models/*','app/Http/Requests/*','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'],
+            'scope'=>'Build Eloquent models, form requests, role middleware and order authorization policy. Match exact migration columns and route contracts shown in the completed-batch context.'
+        ],
+        [
+            'name'=>'storefront_controllers',
             'paths'=>[
                 'app/Http/Controllers/StoreController.php','app/Http/Controllers/CartController.php',
-                'app/Http/Controllers/CheckoutController.php',
-                'resources/views/layouts/*','resources/views/store/*','resources/views/cart/*',
-                'resources/views/checkout/*'
+                'app/Http/Controllers/CheckoutController.php'
             ],
-            'scope'=>'Build the responsive storefront, product search/details, customer account basics, cart, stock-safe checkout and order history views/controllers.'
+            'scope'=>'Build storefront, product search/details, customer account basics, cart, stock-safe checkout and order history controllers. Match completed migrations, models and routes.'
+        ],
+        [
+            'name'=>'storefront_views',
+            'paths'=>['resources/views/layouts/*','resources/views/store/*','resources/views/cart/*','resources/views/checkout/*'],
+            'scope'=>'Build responsive storefront, product, cart, checkout and order history Blade views matching completed controllers and route names.'
         ],
         [
             'name'=>'admin_controllers',
@@ -711,14 +923,20 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             'scope'=>'Build owner admin controllers and restricted sub-admin workflows, server-side authorization, catalog, orders, customers, categories, inventory, settings and safe Google OAuth handling.'
         ],
         [
-            'name'=>'admin_views',
+            'name'=>'admin_views_catalog',
             'paths'=>[
                 'resources/views/admin/*.blade.php','resources/views/admin/products/*.blade.php',
-                'resources/views/admin/orders/*.blade.php','resources/views/admin/categories/*.blade.php',
+                'resources/views/admin/orders/*.blade.php','resources/views/admin/categories/*.blade.php'
+            ],
+            'scope'=>'Build responsive owner/admin Blade screens for dashboard, layout, products, orders and categories.'
+        ],
+        [
+            'name'=>'admin_views_operations',
+            'paths'=>[
                 'resources/views/admin/inventory/*.blade.php','resources/views/admin/subadmins/*.blade.php',
                 'resources/views/admin/customers/*.blade.php','resources/views/admin/settings/*.blade.php'
             ],
-            'scope'=>'Build complete responsive owner/admin and sub-admin Blade screens for products, orders, categories, inventory, customers, staff, branding, shipping, taxes, Telegram, Google OAuth and payment configuration.'
+            'scope'=>'Build responsive owner/admin and sub-admin screens for inventory, customers, staff, branding, shipping, taxes, Telegram, Google OAuth and payment configuration.'
         ],
         [
             'name'=>'integrations',
@@ -743,23 +961,77 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     ];
     $allGeneratedFiles = [];
     $previewId = bin2hex(random_bytes(12));
-    $batchTotal = count($generationBatches);
-    foreach ($generationBatches as $batchIndex => $batch) {
-        progress_event('progress', ['stage'=>$batch['name'],'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)(($batchIndex/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>'ব্যাচ '.$batchIndex+1 .'/'.$batchTotal.' তৈরি হচ্ছে']);
-        $batchText = $system."\\n\\nGENERATION BATCH: ".$batch['name'].
-            "\\nSCOPE: ".$batch['scope'].
-            "\\nONLY CREATE FILES MATCHING THESE PATHS/PATTERNS (glob syntax):\\n- ".
-            implode("\\n- ", $batch['paths']).
-            "\\nReturn JSON only in the required {files:[{path,content}]} schema. ".
+    $fileShas = [];
+    $githubToken = envv('NIRA_GITHUB_TOKEN');
+    $checkpoint = null;
+    $resumeStorage = 'local_ephemeral';
+    $localCheckpoint = checkpoint_local_path($resumeId);
+    $lockDir = dirname($localCheckpoint).'/locks';
+    if (!is_dir($lockDir) && !mkdir($lockDir, 0750, true) && !is_dir($lockDir)) respond(500, ['error'=>'Could not initialize generation lock storage.']);
+    $lockHandle = fopen($lockDir.'/'.$resumeId.'.lock', 'c');
+    if (!is_resource($lockHandle) || !flock($lockHandle, LOCK_EX|LOCK_NB)) respond(409, ['error'=>'এই প্রজেক্টের generation ইতিমধ্যে চলছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।']);
+    if (is_file($localCheckpoint)) {
+        try {
+            $saved=checkpoint_load_local($resumeId,$promptHash);
+            $allGeneratedFiles=$saved['files']; $previewId=$saved['preview_id']; $startBatch=$saved['completed_batch']+1;
+        } catch(Throwable $e) { respond(422,['error'=>'Could not resume local checkpoint: '.$e->getMessage()]); }
+    } else {
+        $startBatch=0;
+        if($githubToken!=='') {
+            try {
+                $checkpoint=checkpoint_repository($resumeId,$githubToken);
+                $saved=checkpoint_load_github($checkpoint,$promptHash,$githubToken);
+                $allGeneratedFiles=$saved['files']; $fileShas=$saved['file_shas']; $previewId=$saved['preview_id'];
+                $startBatch=$saved['completed_batch']+1; $resumeStorage='private_github_checkpoint';
+            } catch(Throwable $e) {
+                error_log('[NIRA_BUILDER_CHECKPOINT] GitHub checkpoint unavailable; using local fallback: '.substr($e->getMessage(),0,300));
+                $checkpoint=null; $resumeStorage='local_ephemeral';
+                if((string)($input['resume_id']??'')!=='') respond(422,['error'=>'Durable checkpoint could not be loaded: '.$e->getMessage()]);
+            }
+        } elseif((string)($input['resume_id']??'')!=='') {
+            respond(422,['error'=>'This resume ID needs the private GitHub checkpoint token or its local checkpoint file.']);
+        }
+    }
+    $GLOBALS['NIRA_RESUME_STORAGE']=$resumeStorage;
+    $GLOBALS['NIRA_RESUME_ID']=$resumeId;
+    if ($allGeneratedFiles) save_preview_snapshot($previewId, $allGeneratedFiles);
+    $batchTotal=count($generationBatches);
+    progress_event('progress',['stage'=>'checkpoint_ready','resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
+        'batch'=>min($startBatch+1,$batchTotal),'total_batches'=>$batchTotal,
+        'percent'=>5+(int)(($startBatch/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),
+        'message'=>$startBatch>0?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে':'প্রজেক্ট তৈরি শুরু হচ্ছে']);
+    for($batchIndex=$startBatch;$batchIndex<$batchTotal;$batchIndex++) {
+        $batch=$generationBatches[$batchIndex];
+        progress_event('progress',['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,'stage'=>$batch['name'],
+            'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)(($batchIndex/$batchTotal)*70),
+            'files_created'=>count($allGeneratedFiles),'message'=>'ব্যাচ '.$batchIndex+1 .'/'.$batchTotal.' তৈরি হচ্ছে']);
+        $contractContext=generation_contract_context($allGeneratedFiles,$batch['name']);
+        $batchText=$system."\n\nGENERATION BATCH: ".$batch['name'].
+            "\nSCOPE: ".$batch['scope'].
+            "\nONLY CREATE FILES MATCHING THESE PATHS/PATTERNS (glob syntax):\n- ".
+            implode("\n- ",$batch['paths']).
+            "\nReturn JSON only in the required {files:[{path,content}]} schema. ".
             "Do not repeat files from another batch, do not create files outside this batch, ".
             "and do not omit any concrete required file in this batch. Use consistent Laravel 10/PHP 8.2 APIs, ".
             "route names, model relationships, database columns and service method signatures across batches. ".
-            "No placeholders, TODOs, fake integration success, real credentials or binary files.\\nUSER REQUEST:\\n".$prompt;
-        try {
-            $aiResult = ai_request_json($batchText, 16000);
-        } catch (Throwable $e) {
-            respond(502, ['error'=>'AI generation failed during '.$batch['name'].' batch.','detail'=>$e->getMessage()]);
+            "No placeholders, TODOs, fake integration success, real credentials or binary files.\nUSER REQUEST:\n".$prompt.
+            $contractContext;
+        $compactNote='';
+        for($batchTry=1;;$batchTry++) {
+            try {
+                $outputTokens=max(6000,min(16000,(int)envv('NIRA_BATCH_OUTPUT_TOKENS','12000')));
+                $aiResult=ai_request_json($batchText.$compactNote,$outputTokens);
+                break;
+            } catch(AiOutputLimitException|AiJsonFormatException $e) {
+                if($batchTry>=2) respond(502,['error'=>'AI output/JSON limit reached in '.$batch['name'].' batch, even in compact mode.','detail'=>$e->getMessage()]);
+                $compactNote="\nCOMPACT MODE: the previous response exceeded the output or JSON-format limit. Return every required file in this batch, but use concise production-ready code, no comments or sample text, minimal markup, and valid complete JSON.";
+                progress_event('progress',['resume_id'=>$resumeId,'stage'=>$batch['name'].'_compact_retry','batch'=>$batchIndex+1,
+                    'total_batches'=>$batchTotal,'message'=>'আউটপুট/JSON সীমা হয়েছে, ছোট করে আবার চেষ্টা হচ্ছে']);
+            } catch(Throwable $e) {
+                respond(502,['error'=>'AI generation failed during '.$batch['name'].' batch.','detail'=>$e->getMessage()]);
+            }
         }
+        $batchNewFiles = [];
         $batchTextOutput = $aiResult['text'];
         $finishReason = (string)($aiResult['finish_reason'] ?? '');
         if (in_array($finishReason, ['MAX_TOKENS','length'], true)) {
@@ -775,10 +1047,16 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                 respond(502, ['error'=>'AI returned a malformed file in '.$batch['name'].' batch.']);
             }
             $generatedPath = clean_name($generatedFile['path']);
+            $pathAllowed = false;
+            foreach ($batch['paths'] as $allowedPattern) {
+                if (fnmatch($allowedPattern, $generatedPath)) { $pathAllowed = true; break; }
+            }
+            if (!$pathAllowed) respond(502, ['error'=>'AI generated a file outside the '.$batch['name'].' batch scope: '.$generatedPath]);
             if (isset($allGeneratedFiles[$generatedPath])) {
                 respond(502, ['error'=>'AI generated a duplicate path across batches: '.$generatedPath]);
             }
             $allGeneratedFiles[$generatedPath] = $generatedFile['content'];
+            $batchNewFiles[$generatedPath] = $generatedFile['content'];
             if (count($allGeneratedFiles) > MAX_OUTPUT_FILES) {
                 respond(422, ['error'=>'Generated project exceeds the 100-file limit.']);
             }
@@ -786,8 +1064,23 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         if (count($batchResult['files']) < 1) {
             respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
         }
-        save_preview_snapshot($previewId, $allGeneratedFiles);
-        progress_event('progress', ['stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,'preview_url'=>'/preview?id='.$previewId.'&view=storefront','preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
+        try {
+            if($checkpoint!==null) {
+                $fileShas=checkpoint_save_github($checkpoint,$batchNewFiles,$fileShas,$batchIndex,$previewId,$promptHash,$name?:'website',$githubToken);
+            } else {
+                checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex,$previewId,$promptHash,$name?:'website');
+            }
+        } catch(Throwable $e) {
+            error_log('[NIRA_BUILDER_CHECKPOINT] batch='.$batch['name'].' error='.substr(preg_replace('/\s+/',' ',$e->getMessage()),0,500));
+            respond(502,['error'=>'Could not save the completed batch checkpoint.','detail'=>$e->getMessage()]);
+        }
+        save_preview_snapshot($previewId,$allGeneratedFiles);
+        progress_event('progress',['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,'stage'=>$batch['name'].'_complete',
+            'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),
+            'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,
+            'preview_url'=>'/preview?id='.$previewId.'&view=storefront',
+            'preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),
+                'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
     }
     $result = ['files'=>[]];
     foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
