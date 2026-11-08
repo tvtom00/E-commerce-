@@ -994,6 +994,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     }
     $GLOBALS['NIRA_RESUME_STORAGE']=$resumeStorage;
     $GLOBALS['NIRA_RESUME_ID']=$resumeId;
+    if ($allGeneratedFiles) save_preview_snapshot($previewId, $allGeneratedFiles);
     $batchTotal=count($generationBatches);
     progress_event('progress',['stage'=>'checkpoint_ready','resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
         'batch'=>min($startBatch+1,$batchTotal),'total_batches'=>$batchTotal,
