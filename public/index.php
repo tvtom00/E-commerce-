@@ -15,10 +15,6 @@ function progress_event(string $event, array $data): void {
 }
 
 function respond(int $status, array $data): never {
-    if ($status >= 400) {
-        $diagnostic = (string)($data['detail'] ?? $data['error'] ?? 'request_failed');
-        error_log('[NIRA_BUILDER_ERROR] status='.$status.' stage='.preg_replace('/[^a-zA-Z0-9_.-]/','_', (string)($data['stage'] ?? 'generation')).' message='.substr(preg_replace('/\\s+/', ' ', $diagnostic), 0, 700));
-    }
     http_response_code($status);
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
         progress_event('error', ['status'=>$status] + $data);
@@ -450,9 +446,7 @@ function github_api(string $method, string $path, string $token, ?array $payload
     $body = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
     $data = is_string($body) ? json_decode($body, true) : null;
     if ($status < 200 || $status >= 300 || !is_array($data)) {
-        $message = is_array($data) ? (string)($data['message'] ?? '') : '';
-        error_log('[NIRA_BUILDER_GITHUB] method='.$method.' path='.preg_replace('/[^a-zA-Z0-9_./-]/','_', $path).' status='.$status.' message='.substr($message, 0, 400));
-        throw new RuntimeException('GitHub API '.$method.' failed (HTTP '.$status.'): '.substr($message ?: 'request failed', 0, 240));
+        throw new RuntimeException('GitHub project publishing failed (HTTP '.$status.').');
     }
     return $data;
 }
@@ -478,61 +472,6 @@ function github_token_is_valid(): bool {
     $data = json_decode($body, true);
     return is_array($data) && isset($data['login']);
 }
-function checkpoint_repository(string $resumeId, string $token): array {
-    if (!preg_match('/^[a-f0-9]{24}$/', $resumeId)) throw new RuntimeException('Invalid resume checkpoint ID.');
-    $user = github_api('GET', '/user', $token);
-    $owner = (string)($user['login'] ?? '');
-    if ($owner === '') throw new RuntimeException('Could not identify GitHub checkpoint owner.');
-    $repo = 'nira-resume-'.$resumeId;
-    try {
-        $data = github_api('GET', '/repos/'.$owner.'/'.$repo, $token);
-        if (empty($data['private'])) throw new RuntimeException('Checkpoint repository must be private.');
-    } catch (Throwable $e) {
-        $data = github_api('POST', '/user/repos', $token, ['name'=>$repo,'private'=>true,'auto_init'=>true,'description'=>'Private Nira generation checkpoint']);
-    }
-    return ['owner'=>$owner,'repo'=>$repo,'branch'=>(string)($data['default_branch'] ?? 'main')];
-}
-function checkpoint_load(array $cp, string $hash): array {
-    $token=envv('NIRA_GITHUB_TOKEN'); $owner=$cp['owner']; $repo=$cp['repo']; $branch=$cp['branch'];
-    $ref=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/ref/heads/'.rawurlencode($branch),$token);
-    $head=(string)($ref['object']['sha']??'');
-    $commit=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/commits/'.$head,$token);
-    $tree=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/trees/'.$commit['tree']['sha'].'?recursive=1',$token);
-    $metaSha='';
-    foreach(($tree['tree']??[]) as $item) if(($item['path']??'')==='.nira-checkpoint.json') {$metaSha=(string)$item['sha'];break;}
-    if($metaSha==='') return ['files'=>[],'completed_batch'=>-1,'preview_id'=>bin2hex(random_bytes(12))];
-    $blob=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/blobs/'.$metaSha,$token);
-    $metaText=base64_decode((string)($blob['content']??''),true);
-    $meta=is_string($metaText)?json_decode($metaText,true):null;
-    if(!is_array($meta)||!hash_equals((string)($meta['prompt_hash']??''),$hash)) throw new RuntimeException('Resume ID does not match this exact project prompt.');
-    $files=[];
-    foreach(($meta['files']??[]) as $path=>$sha) {
-        if(!is_string($path)||!is_string($sha)||count($files)>=MAX_OUTPUT_FILES) continue;
-        $b=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/blobs/'.$sha,$token);
-        $content=base64_decode((string)($b['content']??''),true);
-        if(!is_string($content)||strlen($content)>MAX_FILE_BYTES) throw new RuntimeException('Saved checkpoint file is invalid.');
-        $files[$path]=$content;
-    }
-    return ['files'=>$files,'completed_batch'=>(int)($meta['completed_batch']??-1),'preview_id'=>(string)($meta['preview_id']??bin2hex(random_bytes(12)))];
-}
-function checkpoint_save(array $cp,array $files,int $batch,string $previewId,string $hash,string $project): void {
-    $token=envv('NIRA_GITHUB_TOKEN'); $owner=$cp['owner']; $repo=$cp['repo']; $branch=$cp['branch'];
-    $ref=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/ref/heads/'.rawurlencode($branch),$token);
-    $parent=(string)($ref['object']['sha']??'');
-    $pc=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/commits/'.$parent,$token);
-    $items=[]; $shas=[];
-    foreach($files as $path=>$content) {
-        $b=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/blobs',$token,['content'=>$content,'encoding'=>'utf-8']);
-        $shas[$path]=$b['sha']; $items[]=['path'=>$path,'mode'=>'100644','type'=>'blob','sha'=>$b['sha']];
-    }
-    $meta=['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,'preview_id'=>$previewId,'files'=>$shas,'updated_at'=>gmdate('c')];
-    $mb=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/blobs',$token,['content'=>json_encode($meta,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'encoding'=>'utf-8']);
-    $items[]=['path'=>'.nira-checkpoint.json','mode'=>'100644','type'=>'blob','sha'=>$mb['sha']];
-    $tree=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/trees',$token,['base_tree'=>$pc['tree']['sha'],'tree'=>$items]);
-    $commit=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/commits',$token,['message'=>'Nira checkpoint batch '.($batch+1),'tree'=>$tree['sha'],'parents'=>[$parent]]);
-    github_api('PATCH','/repos/'.$owner.'/'.$repo.'/git/refs/heads/'.rawurlencode($branch),$token,['sha'=>$commit['sha'],'force'=>false]);
-}
-
 function publish_private_github_project(string $projectName, array $files, string $token): array {
     $baseName = strtolower(trim(preg_replace('/[^a-zA-Z0-9-]+/', '-', $projectName), '-'));
     if ($baseName === '') $baseName = 'nira-store';
@@ -650,16 +589,16 @@ button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#c
 <label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40">\n<label>Access token (যদি সার্ভারে সেট করা থাকে)</label><input id="token" type="password" autocomplete="off" placeholder="NIRA_BUILDER_TOKEN">
 <button id="go">Generate website ZIP</button><div id="status"></div><section id="preview"><h2>Static preview (safe mode)</h2><p class="small">এটি generated Blade/CSS থেকে তৈরি নিরাপদ static preview; Laravel/PHP বা generated JavaScript এখানে execute হয় না।</p><div class="preview-tabs"><button id="storeTab" type="button">Storefront</button><button id="adminTab" type="button">Admin Panel</button></div><iframe id="previewFrame" title="Website preview" sandbox=""></iframe></section><section id="revise" style="margin-top:24px;border-top:1px solid #344464;padding-top:20px"><h2>Existing draft design edit</h2><p class="small">Private Nira draft-এর owner ও repository name দিয়ে লিখুন কী পরিবর্তন চান। শুধু Blade/CSS/JS UI বদলাবে; backend/payment/security code অপরিবর্তিত থাকবে।</p><label>GitHub owner</label><input id="revOwner" placeholder="GitHub owner"><label>Private draft repository</label><input id="revRepo" placeholder="repository-name"><label>কী পরিবর্তন করতে চান?</label><textarea id="revInstruction" style="min-height:90px" placeholder="যেমন: সব primary button নীল করো, storefront header আরও modern করো..."></textarea><button id="revGo" type="button">Draft-এ পরিবর্তন করো এবং Preview দেখাও</button><div id="revStatus" class="small"></div></section><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
-const b=document.getElementById('go'),s=document.getElementById('status');const resumeStoreKey='niraBuilderResume';let resumeData=null;try{resumeData=JSON.parse(localStorage.getItem(resumeStoreKey)||'null')}catch(e){resumeData=null}let resumeId=resumeData?.id||null;
-b.onclick=async()=>{const requestKey=document.getElementById('name').value.trim()+'|'+document.getElementById('prompt').value.trim();if(resumeData&&resumeData.key!==requestKey){resumeData=null;resumeId=null;localStorage.removeItem(resumeStoreKey)}b.disabled=true;s.textContent=resumeId?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে...':'প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
-const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value,resume_id:resumeId})});
+const b=document.getElementById('go'),s=document.getElementById('status');
+b.onclick=async()=>{b.disabled=true;s.textContent='প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
+const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value})});
 if(!r.ok && !r.body)throw Error('Generation failed');
 const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
 while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
 for(const block of blocks){const ev=(block.match(/^event: (.+)$/m)||[])[1],data=(block.match(/^data: (.+)$/m)||[])[1];if(!data)continue;const j=JSON.parse(data);
-if(ev==='progress'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}s.textContent=j.message+'\\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
-if(ev==='error'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}throw Error((j.error||'Generation failed')+(j.detail?'\\nকারণ: '+j.detail:'')+(resumeId?'\\nআবার Generate চাপলে শেষ সংরক্ষিত Batch থেকে চলবে।':''));}
-if(ev==='complete'){completed=j;resumeId=null;resumeData=null;localStorage.removeItem(resumeStoreKey);}
+if(ev==='progress'){s.textContent=j.message+'\\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
+if(ev==='error')throw Error(j.error||'Generation failed');
+if(ev==='complete')completed=j;
 }}
 if(!completed)throw Error('Builder connection ended before completion.');
 s.textContent='তৈরি হয়েছে: '+completed.files+'টি ফাইল। '+(completed.github?'Private GitHub draft প্রস্তুত।':'');
@@ -727,11 +666,6 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $input = json_decode($raw ?: '', true);
     $prompt = trim((string)($input['prompt'] ?? ''));
     $name = preg_replace('/[^a-zA-Z0-9_-]/', '-', (string)($input['name'] ?? 'website'));
-    $resumeId = (string)($input['resume_id'] ?? '');
-    if ($resumeId !== '' && !preg_match('/^[a-f0-9]{24}$/', $resumeId)) respond(422, ['error'=>'Invalid resume checkpoint ID.']);
-    if (envv('NIRA_GITHUB_TOKEN') === '') respond(503, ['error'=>'Durable resume requires NIRA_GITHUB_TOKEN.']);
-    if ($resumeId === '') $resumeId = bin2hex(random_bytes(12));
-    $promptHash = hash('sha256', $name . PHP_EOL . $prompt);
     if (strlen($prompt) < 20) respond(422, ['error'=>'কমপক্ষে ২০ অক্ষরের বিস্তারিত নির্দেশনা দিন।']);
     if (strlen($prompt) > 9000) respond(422, ['error'=>'নির্দেশনা খুব বড়।']);
     if (envv('OPENAI_API_KEY') === '' && envv('GEMINI_API_KEY', envv('GOOGLE_API_KEY')) === '' && envv('GROQ_API_KEY') === '') {
@@ -752,24 +686,12 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             'scope'=>'Build the installable Laravel framework skeleton, production configuration, routing, auth foundation, documentation and CI workflow.'
         ],
         [
-            'name'=>'core_migrations',
-            'paths'=>['database/migrations/*'],
-            'scope'=>'Create only the core migrations for users, products, categories, settings and roles. Keep each migration concise, use safe indexes/foreign keys, and do not create carts, orders, inventory or payment tables in this batch.'
-        ],
-        [
-            'name'=>'commerce_migrations_and_seeders',
-            'paths'=>['database/migrations/*','database/seeders/*'],
-            'scope'=>'Create the remaining commerce migrations only: carts/cart_items, orders/order_items, inventory_movements, payment_transactions and audit_events, plus secure owner seeder/setup. Do not repeat users, products, categories, settings or roles migrations.'
-        ],
-        [
-            'name'=>'eloquent_models',
-            'paths'=>['app/Models/*'],
-            'scope'=>'Create all required Eloquent models only: Product, Category, Order, Setting, Role and any supporting models needed for the already specified schema. Define relationships, casts and guarded/fillable fields consistently with migrations.'
-        ],
-        [
-            'name'=>'authorization_and_requests',
-            'paths'=>['app/Http/Requests/*','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'],
-            'scope'=>'Create form request validation classes, role middleware and OrderPolicy only. Enforce owner/sub-admin permissions server-side and match the previously defined models and route contracts.'
+            'name'=>'database_and_models',
+            'paths'=>[
+                'database/migrations/*','database/seeders/*','app/Models/*',
+                'app/Http/Requests/*','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'
+            ],
+            'scope'=>'Build all MySQL/PostgreSQL-compatible migrations, secure owner seed/setup, Eloquent models, form requests, role middleware and order authorization policy. Match framework and route contracts.'
         ],
         [
             'name'=>'storefront_and_checkout',
@@ -821,13 +743,9 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     ];
     $allGeneratedFiles = [];
     $previewId = bin2hex(random_bytes(12));
-    $checkpoint = checkpoint_repository($resumeId, envv('NIRA_GITHUB_TOKEN'));
-    try { $saved = checkpoint_load($checkpoint, $promptHash); $allGeneratedFiles=$saved['files']; $previewId=$saved['preview_id']; $startBatch=$saved['completed_batch']+1; }
-    catch (Throwable $e) { respond(422, ['error'=>'Could not resume saved progress: '.$e->getMessage(),'resume_id'=>$resumeId]); }
     $batchTotal = count($generationBatches);
-    for ($batchIndex=$startBatch; $batchIndex<$batchTotal; $batchIndex++) {
-        $batch=$generationBatches[$batchIndex];
-        progress_event('progress', ['resume_id'=>$resumeId,'stage'=>$batch['name'],'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)(($batchIndex/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>'ব্যাচ '.$batchIndex+1 .'/'.$batchTotal.' তৈরি হচ্ছে']);
+    foreach ($generationBatches as $batchIndex => $batch) {
+        progress_event('progress', ['stage'=>$batch['name'],'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)(($batchIndex/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>'ব্যাচ '.$batchIndex+1 .'/'.$batchTotal.' তৈরি হচ্ছে']);
         $batchText = $system."\\n\\nGENERATION BATCH: ".$batch['name'].
             "\\nSCOPE: ".$batch['scope'].
             "\\nONLY CREATE FILES MATCHING THESE PATHS/PATTERNS (glob syntax):\\n- ".
@@ -840,7 +758,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         try {
             $aiResult = ai_request_json($batchText, 16000);
         } catch (Throwable $e) {
-            respond(502, ['error'=>'AI generation failed during '.$batch['name'].' batch.','detail'=>$e->getMessage(),'resume_id'=>$resumeId,'completed_percent'=>5+(int)(($batchIndex/$batchTotal)*70)]);
+            respond(502, ['error'=>'AI generation failed during '.$batch['name'].' batch.','detail'=>$e->getMessage()]);
         }
         $batchTextOutput = $aiResult['text'];
         $finishReason = (string)($aiResult['finish_reason'] ?? '');
@@ -868,10 +786,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         if (count($batchResult['files']) < 1) {
             respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
         }
-        try { checkpoint_save($checkpoint,$allGeneratedFiles,$batchIndex,$previewId,$promptHash,$name ?: 'website'); }
-        catch (Throwable $e) { error_log('[NIRA_BUILDER_CHECKPOINT] batch='.$batch['name'].' error='.substr(preg_replace('/\\s+/', ' ', $e->getMessage()),0,700)); respond(502, ['error'=>'Checkpoint save failed: '.$e->getMessage(),'resume_id'=>$resumeId,'completed_percent'=>5+(int)(($batchIndex/$batchTotal)*70)]); }
         save_preview_snapshot($previewId, $allGeneratedFiles);
-        progress_event('progress', ['resume_id'=>$resumeId,'stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,'preview_url'=>'/preview?id='.$previewId.'&view=storefront','preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
+        progress_event('progress', ['stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,'preview_url'=>'/preview?id='.$previewId.'&view=storefront','preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
     }
     $result = ['files'=>[]];
     foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
