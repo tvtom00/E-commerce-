@@ -104,7 +104,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
     $sawOutputLimit = false;
     $sawJsonFormatFailure = false;
     foreach ($providers as $provider) {
-        for ($attempt = 1; $attempt <= 2; $attempt++) {
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
             if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
                 $url = $provider['name'] === 'Groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
                 $model = $provider['name'] === 'Groq' ? envv('GROQ_MODEL', 'openai/gpt-oss-120b') : envv('OPENAI_MODEL', 'gpt-4.1-mini');
@@ -190,7 +190,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=invalid_json attempt='.$attempt.$detail);
                 $hitLimit = in_array($finishReason, ['MAX_TOKENS','length'], true);
                 if ($hitLimit) $sawOutputLimit = true;
-                if ($attempt < 2 && !$hitLimit) continue;
+                if ($attempt < 3 && !$hitLimit) { sleep(min(6, 2 ** $attempt)); continue; }
                 break;
             }
 
@@ -217,7 +217,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             $errors[] = $provider['name'].' '.$model.' HTTP '.$code.': '.substr($message, 0, 500);
             error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 500));
             $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true);
-            if (!$retryable || $attempt === 2) break;
+            if (!$retryable || $attempt === 3) break;
             sleep(ai_retry_delay_seconds($answer, $code === 429 ? 10 : 4));
         }
     }
@@ -629,9 +629,29 @@ function build_static_preview(array $files, string $viewPath): string {
     $html = preg_replace('/\s+(href|src)\s*=\s*(["\x27])\s*javascript:[^"\x27]*\2/i', '', $html);
     $html = preg_replace('/\s+srcdoc\s*=\s*("[^"]*"|\x27[^\x27]*\x27)/i', '', $html);
     $html = preg_replace('/@csrf|@method\s*\([^)]*\)|@vite\s*\([^)]*\)/', '', $html);
-    $html = preg_replace('/\{\{\s*(.*?)\s*\}\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
-    $html = preg_replace('/\{!!\s*(.*?)\s*!!\}/s', '<span class="preview-dynamic">[dynamic content]</span>', $html);
-    $html = preg_replace('/@[a-zA-Z_]+(?:\s*\([^)]*\))?/', '', $html);
+    // Keep Blade placeholders outside HTML attributes so the safe preview remains valid HTML.
+    $previewSource = $html;
+    $scanOffset = 0;
+    $html = preg_replace_callback('/\\{\\{\\s*(.*?)\\s*\\}\\}|\\{!!\\s*(.*?)\\s*!!\\}/s', static function(array $m) use ($previewSource, &$scanOffset): string {
+        $offset = strpos($previewSource, $m[0], $scanOffset);
+        if ($offset === false) $offset = $scanOffset;
+        $scanOffset = $offset + strlen($m[0]);
+        $before = substr($previewSource, 0, $offset);
+        $lastOpen = strrpos($before, '<');
+        $lastClose = strrpos($before, '>');
+        $insideTag = $lastOpen !== false && ($lastClose === false || $lastOpen > $lastClose);
+        if ($insideTag) {
+            $tag = substr($before, $lastOpen);
+            if (preg_match('/\\b(src|poster)\\s*=\\s*["\\x27][^"\\x27]*$/i', $tag)) return '';
+            if (preg_match('/\\bhref\\s*=\\s*["\\x27][^"\\x27]*$/i', $tag)) return '#';
+            if (preg_match('/\\balt\\s*=\\s*["\\x27][^"\\x27]*$/i', $tag)) return 'Preview image';
+            return 'Preview';
+        }
+        return '<span class="preview-dynamic">Preview content</span>';
+    }, $html);
+    $html = preg_replace('/<!--[\\s\\S]*?-->/', '', $html);
+    $html = preg_replace('/<\\?php[\\s\\S]*?\\?>|<\\?=[\\s\\S]*?\\?>/', '', $html);
+    $html = preg_replace('/@[a-zA-Z_]+(?:\\s*\\([^)]*\\))?/', '', $html);
 
     $style = '<style>body{margin:0;font-family:system-ui,sans-serif}.preview-dynamic{color:#64748b;background:#e2e8f0;border-radius:4px;padding:1px 4px}.preview-form{pointer-events:none}'.$css.'</style>';
     if (preg_match('/<head\b[^>]*>/i', $html)) {
@@ -954,11 +974,18 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             'scope'=>'Build responsive owner/admin Blade screens for dashboard, layout, products, orders and categories.'
         ],
         [
-            'name'=>'admin_views_operations',
+            'name'=>'admin_views_inventory_staff',
             'paths'=>[
-                'resources/views/admin/inventory/*.blade.php','resources/views/admin/subadmins/*.blade.php',
+                'resources/views/admin/inventory/*.blade.php','resources/views/admin/subadmins/*.blade.php'
+            ],
+            'scope'=>'Build concise responsive owner/admin screens for inventory management and restricted sub-admin staff workflows, consistent with existing controllers and routes.'
+        ],
+        [
+            'name'=>'admin_views_customers_settings',
+            'paths'=>[
                 'resources/views/admin/customers/*.blade.php','resources/views/admin/settings/*.blade.php'
             ],
+            'scope'=>'Build concise responsive owner/admin screens for customers, branding, shipping, taxes, Telegram, Google OAuth and payment configuration, consistent with existing controllers and routes.'
             'scope'=>'Build responsive owner/admin and sub-admin screens for inventory, customers, staff, branding, shipping, taxes, Telegram, Google OAuth and payment configuration.'
         ],
         [
