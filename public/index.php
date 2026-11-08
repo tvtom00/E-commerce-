@@ -15,6 +15,10 @@ function progress_event(string $event, array $data): void {
 }
 
 function respond(int $status, array $data): never {
+    if ($status >= 400) {
+        $diagnostic = (string)($data['detail'] ?? $data['error'] ?? 'request_failed');
+        error_log('[NIRA_BUILDER_ERROR] status='.$status.' stage='.preg_replace('/[^a-zA-Z0-9_.-]/','_', (string)($data['stage'] ?? 'generation')).' message='.substr(preg_replace('/\\s+/', ' ', $diagnostic), 0, 700));
+    }
     http_response_code($status);
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
         progress_event('error', ['status'=>$status] + $data);
@@ -446,7 +450,9 @@ function github_api(string $method, string $path, string $token, ?array $payload
     $body = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
     $data = is_string($body) ? json_decode($body, true) : null;
     if ($status < 200 || $status >= 300 || !is_array($data)) {
-        throw new RuntimeException('GitHub project publishing failed (HTTP '.$status.').');
+        $message = is_array($data) ? (string)($data['message'] ?? '') : '';
+        error_log('[NIRA_BUILDER_GITHUB] method='.$method.' path='.preg_replace('/[^a-zA-Z0-9_./-]/','_', $path).' status='.$status.' message='.substr($message, 0, 400));
+        throw new RuntimeException('GitHub API '.$method.' failed (HTTP '.$status.'): '.substr($message ?: 'request failed', 0, 240));
     }
     return $data;
 }
@@ -652,7 +658,7 @@ const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',complete
 while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
 for(const block of blocks){const ev=(block.match(/^event: (.+)$/m)||[])[1],data=(block.match(/^data: (.+)$/m)||[])[1];if(!data)continue;const j=JSON.parse(data);
 if(ev==='progress'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}s.textContent=j.message+'\\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
-if(ev==='error'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}throw Error((j.error||'Generation failed')+(resumeId?'\\nআবার Generate চাপলে শেষ সংরক্ষিত Batch থেকে চলবে।':''));}
+if(ev==='error'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}throw Error((j.error||'Generation failed')+(j.detail?'\\nকারণ: '+j.detail:'')+(resumeId?'\\nআবার Generate চাপলে শেষ সংরক্ষিত Batch থেকে চলবে।':''));}
 if(ev==='complete'){completed=j;resumeId=null;resumeData=null;localStorage.removeItem(resumeStoreKey);}
 }}
 if(!completed)throw Error('Builder connection ended before completion.');
@@ -863,7 +869,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
         }
         try { checkpoint_save($checkpoint,$allGeneratedFiles,$batchIndex,$previewId,$promptHash,$name ?: 'website'); }
-        catch (Throwable $e) { respond(502, ['error'=>'Checkpoint save failed: '.$e->getMessage(),'resume_id'=>$resumeId]); }
+        catch (Throwable $e) { error_log('[NIRA_BUILDER_CHECKPOINT] batch='.$batch['name'].' error='.substr(preg_replace('/\\s+/', ' ', $e->getMessage()),0,700)); respond(502, ['error'=>'Checkpoint save failed: '.$e->getMessage(),'resume_id'=>$resumeId,'completed_percent'=>5+(int)(($batchIndex/$batchTotal)*70)]); }
         save_preview_snapshot($previewId, $allGeneratedFiles);
         progress_event('progress', ['resume_id'=>$resumeId,'stage'=>$batch['name'].'_complete','batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,'preview_url'=>'/preview?id='.$previewId.'&view=storefront','preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
     }
