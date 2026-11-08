@@ -104,6 +104,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
     $sawOutputLimit = false;
     $sawJsonFormatFailure = false;
     foreach ($providers as $provider) {
+        $requestPrompt = $prompt;
         for ($attempt = 1; $attempt <= 3; $attempt++) {
             if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
                 $url = $provider['name'] === 'Groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
@@ -111,7 +112,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 $headers = ['Content-Type: application/json', 'Authorization: Bearer '.$provider['key']];
                 $payload = [
                     'model'=>$model,
-                    'messages'=>[['role'=>'user','content'=>$prompt]],
+                    'messages'=>[['role'=>'user','content'=>$requestPrompt]],
                     'response_format'=>['type'=>'json_object'],
                     'max_completion_tokens'=>$maxOutputTokens
                 ];
@@ -175,22 +176,26 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                         }
                     }
                 }
+                $detail = $finishReason !== '' ? ' (finishReason='.$finishReason.', response_chars='.strlen($text).')' : ' (response_chars='.strlen($text).')';
                 if (in_array($finishReason, ['MAX_TOKENS','length'], true)) {
                     $sawOutputLimit = true;
                     $errors[] = $provider['name'].' '.$model.' hit the output-token limit'.$detail;
                     error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=max_tokens attempt='.$attempt.$detail);
                     break;
                 }
-                if (is_array($decoded)) {
+                if (is_array($decoded) && !array_is_list($decoded)) {
                     error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=success attempt='.$attempt.' response_chars='.strlen($text));
                     return ['text'=>json_encode($decoded, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'provider'=>$provider['name'],'model'=>$model,'finish_reason'=>$finishReason];
                 }
-                $detail = $finishReason !== '' ? ' (finishReason='.$finishReason.', response_chars='.strlen($text).')' : ' (response_chars='.strlen($text).')';
                 $errors[] = $provider['name'].' '.$model.' returned invalid or incomplete JSON'.$detail;
                 error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=invalid_json attempt='.$attempt.$detail);
                 $hitLimit = in_array($finishReason, ['MAX_TOKENS','length'], true);
                 if ($hitLimit) $sawOutputLimit = true;
-                if ($attempt < 3 && !$hitLimit) { sleep(min(6, 2 ** $attempt)); continue; }
+                if ($attempt < 3 && !$hitLimit) {
+                    $requestPrompt = $prompt."\n\nSTRICT JSON RETRY: Your previous response was not valid JSON. Return exactly one complete JSON object with the required schema. Escape all quotes, backslashes and newlines inside file content. Do not use Markdown fences, comments, trailing commas, or text outside the JSON object. Do not shorten or omit required files.";
+                    sleep(min(4, 2 ** $attempt));
+                    continue;
+                }
                 break;
             }
 
@@ -208,17 +213,21 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 $message = preg_replace('/(?i)(sk-(?:proj-)?[A-Za-z0-9_*.-]{8,}|AIza[0-9A-Za-z_*-]{20,})/', '[REDACTED]', $message);
             }
             $message = preg_replace('/(?i)(sk-(?:proj-)?[A-Za-z0-9_*.-]{8,}|AIza[0-9A-Za-z_*-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,})/', '[REDACTED]', $message);
-            if ($code === 400 && preg_match('/failed to generate json|json_validate_failed|generated json does not match/i', $message)) {
+            $jsonFormatFailure = $code === 400 && preg_match('/failed to generate json|json_validate_failed|generated json does not match|invalid json|failed_generation/i', $message.' '.$failedGeneration);
+            if ($jsonFormatFailure) {
                 $sawJsonFormatFailure = true;
+                if ($attempt < 3) {
+                    $requestPrompt = $prompt."\n\nSTRICT JSON RETRY: The provider rejected the previous output as invalid JSON. Return one complete JSON object only, matching the requested schema exactly. Escape quotes, backslashes and newlines in strings. No Markdown fences, trailing commas, comments, or prose.";
+                }
             }
             if ($code === 400 && preg_match('/max_tokens|max_completion_tokens|token limit/i', $message)) {
                 $sawOutputLimit = true;
             }
             $errors[] = $provider['name'].' '.$model.' HTTP '.$code.': '.substr($message, 0, 500);
             error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 500));
-            $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true);
+            $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true) || $jsonFormatFailure;
             if (!$retryable || $attempt === 3) break;
-            sleep(ai_retry_delay_seconds($answer, $code === 429 ? 10 : 4));
+            sleep($jsonFormatFailure ? min(4, 2 ** $attempt) : ai_retry_delay_seconds($answer, $code === 429 ? 10 : 4));
         }
     }
     $failureSummary = 'All configured AI providers failed. '.implode(' | ', $errors);
