@@ -505,16 +505,30 @@ function s3_object_request(string $method, string $key, string $body = ''): stri
     return $response;
 }
 
+final class GitHubApiException extends RuntimeException {
+    public function __construct(public readonly int $status, string $message) {
+        parent::__construct($message);
+    }
+}
+
 function github_api(string $method, string $path, string $token, ?array $payload = null): array {
     $ch = curl_init('https://api.github.com'.$path);
     $headers = ['Accept: application/vnd.github+json','Authorization: Bearer '.$token,'X-GitHub-Api-Version: 2022-11-28','User-Agent: Nira-Website-Builder'];
     $opts = [CURLOPT_CUSTOMREQUEST=>$method,CURLOPT_HTTPHEADER=>$headers,CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>35];
     if ($payload !== null) { $headers[] = 'Content-Type: application/json'; $opts[CURLOPT_HTTPHEADER] = $headers; $opts[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_SLASHES); }
     curl_setopt_array($ch, $opts);
-    $body = curl_exec($ch); $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+    $body = curl_exec($ch);
+    $curlError = curl_error($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
     $data = is_string($body) ? json_decode($body, true) : null;
     if ($status < 200 || $status >= 300 || !is_array($data)) {
-        throw new RuntimeException('GitHub project publishing failed (HTTP '.$status.').');
+        $detail = is_array($data) ? (string)($data['message'] ?? '') : '';
+        if ($detail === '') $detail = $curlError !== '' ? $curlError : 'GitHub returned an unreadable response.';
+        if ($token !== '') $detail = str_replace($token, '[REDACTED]', $detail);
+        $detail = preg_replace('/(?i)(gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})/', '[REDACTED]', $detail);
+        $detail = substr(trim($detail), 0, 220);
+        throw new GitHubApiException($status, 'GitHub API HTTP '.$status.': '.$detail);
     }
     return $data;
 }
@@ -636,15 +650,24 @@ function checkpoint_local_path(string $resumeId): string {
 
 function checkpoint_repository(string $resumeId, string $token): array {
     if (!preg_match('/^[a-f0-9]{24}$/', $resumeId)) throw new RuntimeException('Invalid resume checkpoint ID.');
-    $user=github_api('GET','/user',$token); $owner=(string)($user['login']??'');
-    if($owner==='') throw new RuntimeException('Could not identify GitHub checkpoint owner.');
-    $repo='nira-resume-'.$resumeId;
+    // The Builder account is known; avoid GET /user, which is not needed for
+    // repository-scoped checkpoint access with a fine-grained personal token.
+    $owner = envv('NIRA_GITHUB_OWNER', 'tvtom00');
+    if (!preg_match('/^[A-Za-z0-9-]{1,39}$/', $owner)) {
+        throw new RuntimeException('NIRA_GITHUB_OWNER must be a valid GitHub account name.');
+    }
+    $repo = 'nira-resume-'.$resumeId;
     try {
-        $data=github_api('GET','/repos/'.$owner.'/'.$repo,$token);
-        if(empty($data['private'])) throw new RuntimeException('Checkpoint repository must be private.');
-    } catch(Throwable $e) {
-        $data=github_api('POST','/user/repos',$token,['name'=>$repo,'private'=>true,'auto_init'=>true,
-            'description'=>'Private Nira AI Builder generation checkpoint']);
+        $data = github_api('GET', '/repos/'.$owner.'/'.$repo, $token);
+        if (empty($data['private'])) throw new RuntimeException('Checkpoint repository must be private.');
+    } catch (GitHubApiException $e) {
+        // A missing checkpoint repository is the only condition that should
+        // trigger creation. Never turn 403/401/rate-limit failures into POSTs.
+        if ($e->status !== 404) throw $e;
+        $data = github_api('POST', '/user/repos', $token, [
+            'name'=>$repo,'private'=>true,'auto_init'=>true,
+            'description'=>'Private Nira AI Builder generation checkpoint',
+        ]);
     }
     return ['owner'=>$owner,'repo'=>$repo,'branch'=>(string)($data['default_branch']??'main')];
 }
