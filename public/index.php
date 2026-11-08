@@ -123,10 +123,12 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                     'contents'=>[['parts'=>[['text'=>$prompt]]]],
                     'generationConfig'=>['responseMimeType'=>'application/json','maxOutputTokens'=>$maxOutputTokens]
                 ];
-                $thinkingBudget = envv('GEMINI_THINKING_BUDGET');
-                if ($thinkingBudget !== '' && preg_match('/^-?\d+$/', $thinkingBudget)) {
-                    $payload['generationConfig']['thinkingConfig'] = ['thinkingBudget'=>(int)$thinkingBudget];
-                }
+                // Gemini 3.x uses thinkingLevel; a low level preserves more of the output budget for code.
+                $thinkingLevel = strtolower(envv('GEMINI_THINKING_LEVEL', 'low'));
+                $allowedThinkingLevels = str_contains($model, '3.8-flash')
+                    ? ['low','medium','high'] : ['minimal','low','medium','high'];
+                if (!in_array($thinkingLevel, $allowedThinkingLevels, true)) $thinkingLevel = 'low';
+                $payload['generationConfig']['thinkingConfig'] = ['thinkingLevel'=>$thinkingLevel];
             }
             $ch = curl_init($url);
             curl_setopt_array($ch, [
