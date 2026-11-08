@@ -106,6 +106,9 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
     foreach ($providers as $provider) {
         $requestPrompt = $prompt;
         for ($attempt = 1; $attempt <= 3; $attempt++) {
+            // Reduce the response budget on retries so invalid/truncated JSON gets
+            // a genuinely smaller second and third attempt.
+            $attemptOutputTokens = max(2000, (int)floor($maxOutputTokens / (2 ** ($attempt - 1))));
             if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
                 $url = $provider['name'] === 'Groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
                 $model = $provider['name'] === 'Groq' ? envv('GROQ_MODEL', 'openai/gpt-oss-120b') : envv('OPENAI_MODEL', 'gpt-4.1-mini');
@@ -114,15 +117,15 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                     'model'=>$model,
                     'messages'=>[['role'=>'user','content'=>$requestPrompt]],
                     'response_format'=>['type'=>'json_object'],
-                    'max_completion_tokens'=>$maxOutputTokens
+                    'max_completion_tokens'=>$attemptOutputTokens
                 ];
             } else {
                 $model = $provider['model'];
                 $url = 'https://generativelanguage.googleapis.com/v1beta/models/'.rawurlencode($model).':generateContent?key='.rawurlencode($provider['key']);
                 $headers = ['Content-Type: application/json'];
                 $payload = [
-                    'contents'=>[['parts'=>[['text'=>$prompt]]]],
-                    'generationConfig'=>['responseMimeType'=>'application/json','maxOutputTokens'=>$maxOutputTokens]
+                    'contents'=>[['parts'=>[['text'=>$requestPrompt]]]],
+                    'generationConfig'=>['responseMimeType'=>'application/json','maxOutputTokens'=>$attemptOutputTokens]
                 ];
                 // Gemini 3.x uses thinkingLevel; a low level preserves more of the output budget for code.
                 $thinkingLevel = strtolower(envv('GEMINI_THINKING_LEVEL', 'low'));
@@ -1077,7 +1080,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         $compactNote='';
         for($batchTry=1;;$batchTry++) {
             try {
-                $outputTokens=max(6000,min(16000,(int)envv('NIRA_BATCH_OUTPUT_TOKENS','12000')));
+                $outputTokens=max(4000,min(10000,(int)envv('NIRA_BATCH_OUTPUT_TOKENS','8000')));
                 $aiResult=ai_request_json($batchText.$compactNote,$outputTokens);
                 break;
             } catch(AiOutputLimitException|AiJsonFormatException $e) {
