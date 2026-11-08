@@ -986,7 +986,6 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                 'resources/views/admin/customers/*.blade.php','resources/views/admin/settings/*.blade.php'
             ],
             'scope'=>'Build concise responsive owner/admin screens for customers, branding, shipping, taxes, Telegram, Google OAuth and payment configuration, consistent with existing controllers and routes.'
-            'scope'=>'Build responsive owner/admin and sub-admin screens for inventory, customers, staff, branding, shipping, taxes, Telegram, Google OAuth and payment configuration.'
         ],
         [
             'name'=>'integrations',
