@@ -51,14 +51,14 @@ function ai_retry_delay_seconds(mixed $answer, int $default): int {
     if (is_array($answer)) {
         foreach (($answer['error']['details'] ?? []) as $detail) {
             if (is_array($detail) && isset($detail['retryDelay']) && is_string($detail['retryDelay'])
-                && preg_match('/^(\\d+(?:\\.\\d+)?)s$/', $detail['retryDelay'], $m)) {
+                && preg_match('/^(\d+(?:\.\d+)?)s$/', $detail['retryDelay'], $m)) {
                 return max(1, min(120, (int)ceil((float)$m[1]) + 2));
             }
         }
         // Groq reports TPM exhaustion in error.message, e.g.:
         // "Please try again in 36.0975s". Respect its rolling-window reset.
         $message = (string)($answer['error']['message'] ?? '');
-        if (preg_match('/try again in\\s+(\\d+(?:\\.\\d+)?)\\s*s/i', $message, $m)) {
+        if (preg_match('/try again in\s+(\d+(?:\.\d+)?)\s*s/i', $message, $m)) {
             return max(1, min(120, (int)ceil((float)$m[1]) + 2));
         }
     }
