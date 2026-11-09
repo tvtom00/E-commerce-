@@ -1248,79 +1248,93 @@ SH;
     // If the batches completed but omitted a required file, repair only that
     // exact path from the saved project context. Never restart completed batches.
     $validatedFiles = null;
-    for ($repairAttempt = 0; $repairAttempt <= 8; $repairAttempt++) {
+    $repairHistory = [];
+    for ($repairAttempt = 0; $repairAttempt < 8; $repairAttempt++) {
         try {
             $validatedFiles = validate_laravel_project($result['files']);
             break;
         } catch (Throwable $validationError) {
             $validationMessage = $validationError->getMessage();
-            if ($repairAttempt >= 8) {
-                respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$validationMessage]);
+            if ($repairAttempt >= 7) {
+                respond(422, ['error'=>'Automatic Laravel repair reached its safety limit.','detail'=>$validationMessage,'repairs'=>$repairHistory]);
             }
-            $repairKind = 'file';
-            $repairInstruction = '';
-            if (preg_match('/Laravel E-commerce output is missing required file: ([a-zA-Z0-9._\\/-]+)/', $validationMessage, $missingMatch)) {
-                $missingPath = clean_name($missingMatch[1]);
-                $repairInstruction = 'Create the exact missing Laravel file.';
-            } elseif (str_contains($validationMessage, 'Laravel project is missing required MySQL migrations.')) {
-                $repairKind = 'migration';
-                $neededMigrations = ['create_products','create_categories','create_orders','create_order_items','create_settings','create_roles'];
-                $missingMigration = null;
-                foreach ($neededMigrations as $migrationSlug) {
-                    $found = false;
-                    foreach (array_keys($allGeneratedFiles) as $existingPath) {
-                        if (str_starts_with($existingPath, 'database/migrations/') && str_contains($existingPath, $migrationSlug)) { $found = true; break; }
-                    }
-                    if (!$found) { $missingMigration = $migrationSlug; break; }
-                }
-                if ($missingMigration === null) {
-                    $neededMigrations = ['create_carts','create_cart_items','create_inventory_movements','create_payment_transactions','create_audit_events'];
-                    foreach ($neededMigrations as $migrationSlug) {
-                        $found = false;
-                        foreach (array_keys($allGeneratedFiles) as $existingPath) {
-                            if (str_starts_with($existingPath, 'database/migrations/') && str_contains($existingPath, $migrationSlug)) { $found = true; break; }
-                        }
-                        if (!$found) { $missingMigration = $migrationSlug; break; }
-                    }
-                }
-                if ($missingMigration === null) respond(422, ['error'=>'Laravel migration validation failed; no missing migration path could be identified.']);
-                $missingPath = 'database/migrations/'.date('Y_m_d_His').sprintf('_%02d', $repairAttempt+1).'_'.$missingMigration.'_table.php';
-                $repairInstruction = 'Create one complete Laravel anonymous migration file for the required MySQL table '.$missingMigration.'. Use Schema::create, correct columns, indexes, foreign keys and down() rollback. Match the existing models and other migrations.';
-            } else {
-                respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$validationMessage]);
-            }
-            if (isset($allGeneratedFiles[$missingPath])) {
-                respond(422, ['error'=>'Laravel repair path already exists: '.$missingPath]);
-            }
-            progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
-                'stage'=>'repair_missing_file','percent'=>80,'files_created'=>count($allGeneratedFiles),
-                'message'=>'একটি অনুপস্থিত Laravel ফাইল তৈরি ও যাচাই করা হচ্ছে: '.$missingPath]);
 
-            $repairContext = generation_contract_context($allGeneratedFiles, $repairKind === 'migration' ? 'models_and_policies' : 'storefront_views');
+            // General self-repair: let the validator describe the actual defect,
+            // then let the model repair every related file in one bounded pass.
+            // Runtime/security-owned files are never editable by this repair loop.
+            $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
+            $fileList = implode("\n", array_keys($allGeneratedFiles));
+            $context = "";
+            $contextBudget = 42000;
+            foreach ($allGeneratedFiles as $contextPath=>$contextContent) {
+                if (in_array($contextPath, $protectedPaths, true)) continue;
+                $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 3500);
+                if (strlen($context) + strlen($entry) > $contextBudget) break;
+                $context .= $entry;
+            }
+            $repairHistory[] = ['attempt'=>$repairAttempt+1,'error'=>substr($validationMessage,0,500)];
+            progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
+                'stage'=>'auto_repair','percent'=>80,'files_created'=>count($allGeneratedFiles),
+                'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/8)']);
+
             $repairPrompt = $system.
-                "\n\nREPAIR TASK: ".$repairInstruction.
-                "\nEXACT REQUIRED PATH: ".$missingPath.
-                "\nReturn JSON only: {\"files\":[{\"path\":\"".$missingPath."\",\"content\":\"complete file content\"}]}.".
-                "\nDo not return any other path. Do not change or repeat existing files. Use the existing routes, models, controllers, layout and design consistently.".
-                "\nUSER REQUEST:\n".$prompt.$repairContext;
+                "\n\nAUTONOMOUS PROJECT REPAIR TASK.".
+                "\nThe complete Laravel project already exists. The validator failed with this exact diagnostic: ".$validationMessage.
+                "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
+                "\nExisting project file paths:\n".$fileList.
+                "\nReturn JSON only: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file content\"}]}.".
+                "\nReturn 1 to 8 complete text files. You may create missing files or replace faulty existing files, but do not return unchanged files.".
+                "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
+                "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
+                "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
+                "\nFor content validation errors, fix the actual implementation rather than inserting placeholder text or bypassing validation.".
+                "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
+                "\nUSER REQUEST:\n".$prompt.
+                "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context;
+
             try {
-                $repairResult = ai_request_json($repairPrompt, 3000);
+                $repairResult = ai_request_json($repairPrompt, 7000);
                 $repairData = json_decode($repairResult['text'], true);
-                if (!is_array($repairData) || !isset($repairData['files']) || !is_array($repairData['files']) || count($repairData['files']) !== 1) {
-                    throw new RuntimeException('AI did not return exactly one repair file.');
+                if (!is_array($repairData) || !isset($repairData['files']) || !is_array($repairData['files'])
+                    || count($repairData['files']) < 1 || count($repairData['files']) > 8) {
+                    throw new RuntimeException('AI repair must return between 1 and 8 files.');
                 }
-                $repairFile = $repairData['files'][0];
-                if (!is_array($repairFile) || ($repairFile['path'] ?? '') !== $missingPath
-                    || !isset($repairFile['content']) || !is_string($repairFile['content'])
-                    || trim($repairFile['content']) === '' || strlen($repairFile['content']) > MAX_FILE_BYTES) {
-                    throw new RuntimeException('AI repair output did not match the exact missing path or file-size limit.');
+                $changedFiles = [];
+                foreach ($repairData['files'] as $repairFile) {
+                    if (!is_array($repairFile) || !isset($repairFile['path'],$repairFile['content'])
+                        || !is_string($repairFile['path']) || !is_string($repairFile['content'])) {
+                        throw new RuntimeException('AI repair returned an invalid file record.');
+                    }
+                    $repairPath = clean_name($repairFile['path']);
+                    if (in_array($repairPath, $protectedPaths, true) || $repairPath === '.env'
+                        || str_starts_with($repairPath, '.env.')) {
+                        throw new RuntimeException('AI repair attempted to modify a protected runtime or environment file.');
+                    }
+                    $pathParts = explode('/', $repairPath);
+                    if (in_array('..',$pathParts,true) || in_array('vendor',$pathParts,true)
+                        || in_array('node_modules',$pathParts,true) || in_array('.git',$pathParts,true)
+                        || in_array('storage',$pathParts,true)) {
+                        throw new RuntimeException('AI repair returned an unsafe path.');
+                    }
+                    if (trim($repairFile['content']) === '' || strlen($repairFile['content']) > MAX_FILE_BYTES) {
+                        throw new RuntimeException('AI repair returned empty content or exceeded the per-file size limit.');
+                    }
+                    if (preg_match('/(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{30,}|GOCSPX-[A-Za-z0-9_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{25,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/', $repairFile['content'])) {
+                        throw new RuntimeException('AI repair output contained a possible secret.');
+                    }
+                    $changedFiles[$repairPath] = $repairFile['content'];
                 }
-                if (preg_match('/(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{30,}|GOCSPX-[A-Za-z0-9_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{25,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/', $repairFile['content'])) {
-                    throw new RuntimeException('AI repair output contained a possible secret.');
+                if (!$changedFiles) throw new RuntimeException('AI repair returned no usable files.');
+                if (count($allGeneratedFiles) + count(array_diff_key($changedFiles,$allGeneratedFiles)) > MAX_OUTPUT_FILES) {
+                    throw new RuntimeException('Automatic repair would exceed the project file limit.');
                 }
-                $allGeneratedFiles[$missingPath] = $repairFile['content'];
+                $allGeneratedFiles = array_replace($allGeneratedFiles, $changedFiles);
+                $totalRepairBytes = 0;
+                foreach ($allGeneratedFiles as $sourceContent) $totalRepairBytes += strlen($sourceContent);
+                if ($totalRepairBytes > MAX_TOTAL_BYTES) throw new RuntimeException('Automatic repair would exceed the project total size limit.');
+
                 if ($checkpoint !== null) {
-                    $fileShas = checkpoint_save_github($checkpoint, [$missingPath=>$repairFile['content']], $fileShas,
+                    $fileShas = checkpoint_save_github($checkpoint, $changedFiles, $fileShas,
                         max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website', $githubToken);
                 } else {
                     checkpoint_save_local($resumeId, $allGeneratedFiles, max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website');
@@ -1334,12 +1348,13 @@ SH;
                 $runtimeFiles[] = ['path'=>'Dockerfile','content'=>$dockerContent];
                 $runtimeFiles[] = ['path'=>'docker/entrypoint.sh','content'=>$entrypointContent];
                 $result['files'] = $runtimeFiles;
+                error_log('[NIRA_BUILDER_REPAIR] attempt='.($repairAttempt+1).' files='.implode(',',array_keys($changedFiles)));
             } catch (Throwable $repairError) {
-                respond(502, ['error'=>'Could not repair missing Laravel file '.$missingPath.'.','detail'=>$repairError->getMessage()]);
+                respond(502, ['error'=>'Automatic Laravel project repair failed.','detail'=>$repairError->getMessage(),'validation'=>$validationMessage]);
             }
         }
     }
-    if (!is_array($validatedFiles)) respond(422, ['error'=>'Laravel validation did not complete after missing-file repair.']);
+    if (!is_array($validatedFiles)) respond(422, ['error'=>'Laravel validation did not complete after automatic repair.']);
     progress_event('progress', ['stage'=>'validation_complete','percent'=>88,'files_created'=>count($validatedFiles),'message'=>'যাচাই সম্পন্ন']);
     if (!class_exists(ZipArchive::class)) respond(500, ['error'=>'ZIP extension is not available.']);
     $id = bin2hex(random_bytes(12)); $storageRoot = envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated');
