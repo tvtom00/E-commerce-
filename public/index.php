@@ -1265,10 +1265,10 @@ SH;
             $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
             $fileList = implode("\n", array_keys($allGeneratedFiles));
             $context = "";
-            $contextBudget = 42000;
+            $contextBudget = 10000; // Keep repair input below Groq's 8K TPM request ceiling after system/prompt overhead.
             foreach ($allGeneratedFiles as $contextPath=>$contextContent) {
                 if (in_array($contextPath, $protectedPaths, true)) continue;
-                $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 3500);
+                $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 1800);
                 if (strlen($context) + strlen($entry) > $contextBudget) break;
                 $context .= $entry;
             }
