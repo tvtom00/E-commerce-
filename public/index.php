@@ -1244,8 +1244,72 @@ SH;
     $runtimeFiles[] = ['path'=>'docker/entrypoint.sh','content'=>$entrypointContent];
     $result['files'] = $runtimeFiles;
     progress_event('progress', ['stage'=>'validation','percent'=>80,'files_created'=>count($result['files']),'message'=>'প্রজেক্টের ফাইল ও নিরাপত্তা যাচাই হচ্ছে']);
-    try { $validatedFiles = validate_laravel_project($result['files']); }
-    catch (Throwable $e) { respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$e->getMessage()]); }
+
+    // If the batches completed but omitted a required file, repair only that
+    // exact path from the saved project context. Never restart completed batches.
+    $validatedFiles = null;
+    for ($repairAttempt = 0; $repairAttempt <= 8; $repairAttempt++) {
+        try {
+            $validatedFiles = validate_laravel_project($result['files']);
+            break;
+        } catch (Throwable $validationError) {
+            $validationMessage = $validationError->getMessage();
+            if ($repairAttempt >= 8
+                || !preg_match('/Laravel E-commerce output is missing required file: ([a-zA-Z0-9._\\/-]+)/', $validationMessage, $missingMatch)) {
+                respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$validationMessage]);
+            }
+            $missingPath = clean_name($missingMatch[1]);
+            if (isset($allGeneratedFiles[$missingPath])) {
+                respond(422, ['error'=>'Laravel validation reported an existing file as missing: '.$missingPath]);
+            }
+            progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
+                'stage'=>'repair_missing_file','percent'=>80,'files_created'=>count($allGeneratedFiles),
+                'message'=>'একটি অনুপস্থিত Laravel ফাইল তৈরি ও যাচাই করা হচ্ছে: '.$missingPath]);
+
+            $repairContext = generation_contract_context($allGeneratedFiles, 'storefront_views');
+            $repairPrompt = $system.
+                "\n\nREPAIR TASK: Create exactly one missing file for the already-generated Laravel e-commerce project.".
+                "\nEXACT REQUIRED PATH: ".$missingPath.
+                "\nReturn JSON only: {\"files\":[{\"path\":\"".$missingPath."\",\"content\":\"complete file content\"}]}.".
+                "\nDo not return any other path. Do not change or repeat existing files. Use the existing routes, models, controllers, layout and design consistently.".
+                "\nUSER REQUEST:\n".$prompt.$repairContext;
+            try {
+                $repairResult = ai_request_json($repairPrompt, 3000);
+                $repairData = json_decode($repairResult['text'], true);
+                if (!is_array($repairData) || !isset($repairData['files']) || !is_array($repairData['files']) || count($repairData['files']) !== 1) {
+                    throw new RuntimeException('AI did not return exactly one repair file.');
+                }
+                $repairFile = $repairData['files'][0];
+                if (!is_array($repairFile) || ($repairFile['path'] ?? '') !== $missingPath
+                    || !isset($repairFile['content']) || !is_string($repairFile['content'])
+                    || trim($repairFile['content']) === '' || strlen($repairFile['content']) > MAX_FILE_BYTES) {
+                    throw new RuntimeException('AI repair output did not match the exact missing path or file-size limit.');
+                }
+                if (preg_match('/(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{30,}|GOCSPX-[A-Za-z0-9_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{25,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/', $repairFile['content'])) {
+                    throw new RuntimeException('AI repair output contained a possible secret.');
+                }
+                $allGeneratedFiles[$missingPath] = $repairFile['content'];
+                if ($checkpoint !== null) {
+                    $fileShas = checkpoint_save_github($checkpoint, [$missingPath=>$repairFile['content']], $fileShas,
+                        max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website', $githubToken);
+                } else {
+                    checkpoint_save_local($resumeId, $allGeneratedFiles, max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website');
+                }
+                save_preview_snapshot($previewId, $allGeneratedFiles);
+                $runtimeFiles = [];
+                foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
+                    if (in_array($generatedPath, ['Dockerfile','docker/entrypoint.sh'], true)) continue;
+                    $runtimeFiles[] = ['path'=>$generatedPath,'content'=>$generatedContent];
+                }
+                $runtimeFiles[] = ['path'=>'Dockerfile','content'=>$dockerContent];
+                $runtimeFiles[] = ['path'=>'docker/entrypoint.sh','content'=>$entrypointContent];
+                $result['files'] = $runtimeFiles;
+            } catch (Throwable $repairError) {
+                respond(502, ['error'=>'Could not repair missing Laravel file '.$missingPath.'.','detail'=>$repairError->getMessage()]);
+            }
+        }
+    }
+    if (!is_array($validatedFiles)) respond(422, ['error'=>'Laravel validation did not complete after missing-file repair.']);
     progress_event('progress', ['stage'=>'validation_complete','percent'=>88,'files_created'=>count($validatedFiles),'message'=>'যাচাই সম্পন্ন']);
     if (!class_exists(ZipArchive::class)) respond(500, ['error'=>'ZIP extension is not available.']);
     $id = bin2hex(random_bytes(12)); $storageRoot = envv('NIRA_STORAGE_PATH', __DIR__.'/../storage/generated');
