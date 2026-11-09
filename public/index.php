@@ -735,6 +735,7 @@ function checkpoint_load_local(string $resumeId, string $promptHash): array {
     }
     if($total>MAX_TOTAL_BYTES) throw new RuntimeException('Saved checkpoint exceeds the project source limit.');
     return ['files'=>$files,'file_shas'=>[],'completed_batch'=>(int)($saved['completed_batch']??-1),
+        'batch_plan'=>(string)($saved['batch_plan']??'legacy-12-batches'),
         'preview_id'=>(string)($saved['preview_id']??bin2hex(random_bytes(12)))];
 }
 
@@ -764,13 +765,14 @@ function checkpoint_load_github(array $cp, string $hash, string $token): array {
         $files[$p]=$content;
     }
     return ['files'=>$files,'file_shas'=>$fileShas,'completed_batch'=>(int)($meta['completed_batch']??-1),
+        'batch_plan'=>(string)($meta['batch_plan']??'legacy-12-batches'),
         'preview_id'=>(string)($meta['preview_id']??bin2hex(random_bytes(12)))];
 }
 
 function checkpoint_save_local(string $id, array $files, int $batch, string $previewId, string $hash, string $project): void {
     $path=checkpoint_local_path($id);
     $json=json_encode(['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,
-        'preview_id'=>$previewId,'files'=>$files,'updated_at'=>gmdate('c')],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        'batch_plan'=>'13-batches-v1','preview_id'=>$previewId,'files'=>$files,'updated_at'=>gmdate('c')],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
     if(!is_string($json)) throw new RuntimeException('Could not encode local generation checkpoint.');
     $tmp=$path.'.tmp';
     if(file_put_contents($tmp,$json,LOCK_EX)===false||!rename($tmp,$path)) { @unlink($tmp); throw new RuntimeException('Could not save local generation checkpoint.'); }
@@ -787,7 +789,7 @@ function checkpoint_save_github(array $cp, array $newFiles, array $fileShas, int
         $blob=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/blobs',$token,['content'=>$content,'encoding'=>'utf-8']);
         $fileShas[$path]=$blob['sha']; $items[]=['path'=>$path,'mode'=>'100644','type'=>'blob','sha'=>$blob['sha']];
     }
-    $meta=['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,'preview_id'=>$previewId,
+    $meta=['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,'batch_plan'=>'13-batches-v1','preview_id'=>$previewId,
         'files'=>$fileShas,'updated_at'=>gmdate('c')];
     $mb=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/blobs',$token,['content'=>json_encode($meta,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'encoding'=>'utf-8']);
     $items[]=['path'=>'.nira-checkpoint.json','mode'=>'100644','type'=>'blob','sha'=>$mb['sha']];
@@ -795,6 +797,14 @@ function checkpoint_save_github(array $cp, array $newFiles, array $fileShas, int
     $commit=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/commits',$token,['message'=>'Nira checkpoint batch '.($batch+1),'tree'=>$tree['sha'],'parents'=>[$parent]]);
     github_api('PATCH','/repos/'.$owner.'/'.$repo.'/git/refs/heads/'.rawurlencode($branch),$token,['sha'=>$commit['sha'],'force'=>false]);
     return $fileShas;
+}
+
+function generation_progress_percent(int $completedBatches): int {
+    // Preserve the old 12-batch progress scale: the final test batch is split
+    // into two half-sized batches, so resuming an old checkpoint does not jump backwards.
+    $completedUnits = min(11, max(0, $completedBatches))
+        + 0.5 * min(2, max(0, $completedBatches - 11));
+    return 5 + (int)(($completedUnits / 12) * 70);
 }
 
 function generation_contract_context(array $files, string $batchName): string {
@@ -805,7 +815,7 @@ function generation_contract_context(array $files, string $batchName): string {
         'admin_controllers'=>['routes/web.php','app/Models/','app/Http/Requests/','app/Http/Middleware/EnsureRole.php','app/Policies/OrderPolicy.php'],
         'admin_views_catalog','admin_views_operations'=>['routes/web.php','app/Models/','app/Http/Controllers/Admin/','resources/views/layouts/app.blade.php'],
         'integrations'=>['routes/web.php','database/migrations/','app/Models/','app/Http/Controllers/Admin/SettingsController.php'],
-        'feature_tests'=>['routes/','database/migrations/','app/Models/','app/Http/Controllers/','app/Http/Middleware/','app/Policies/','app/Services/'],
+        'feature_tests','feature_tests_integrations'=>['routes/','database/migrations/','app/Models/','app/Http/Controllers/','app/Http/Middleware/','app/Policies/','app/Services/'],
         default=>[]
     };
     if(!$wanted) return '';
@@ -946,8 +956,9 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         respond(503, ['error'=>'Server setup incomplete: configure OPENAI_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY in Render Environment.']);
     }
     $system = "You are Nira's complete Laravel E-commerce application generator. Return ONLY valid JSON: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file text\"}]}. MANDATORY: generate a complete, installable Laravel Framework application, never Core PHP, plain PHP, WordPress, Node-only, or a static mockup. Require laravel/framework and a supported PHP version in composer.json. Generate only the files genuinely required for the complete requested Laravel application; do not pad the project with unnecessary files. The hard safety ceiling is 2000 text files, each <=512KB, with total source <=50MB. If more files or source size would be required, stop safely with a clear limit error rather than silently omitting required features. Every required feature must be implemented end-to-end across routes, validation, authorization, controllers, services, database migrations, Blade views, and feature tests; a view or placeholder class alone does not count. Include the complete Laravel app: artisan, bootstrap/app.php, public/index.php and .htaccess, routes/web.php and auth.php, MySQL config and .env.example, models, controllers, middleware, policies, requests, migrations, seeders, Blade storefront/admin views, CSS/JS, feature tests, README, and .github/workflows/laravel-validate.yml. Required modules: responsive customer-specific storefront, search, product detail, cart, checkout, customer accounts/order history, owner admin, product/category/inventory CRUD, orders/customers, sub-admin restricted to order management with server-side authorization, JSON product attributes, Gemini product description JSON generation and live product chat, Telegram notifications/settings, Google OAuth configuration, provider-neutral configurable payment adapter and secure webhook. Derive store name, niche, catalog, currency, colors, layout, language and brand from the user's brief; do not hardcode a demo shop. Use MySQL for production and include cPanel installation instructions. Include migrations for users, products, categories, product images, carts/cart items (or secure session cart), orders, order items, inventory movements, settings, roles/permissions, payment transactions, and audit events; include seeders that create the first owner securely from environment variables or a one-time setup flow. Store money as integer minor units or fixed-precision decimals, use database transactions and row locks for stock/order changes, prevent overselling, validate shipping/tax totals server-side, and never trust client-submitted prices. Implement CSRF protection, authentication throttling, authorization policies, form requests, output escaping, upload MIME/size validation, and secure session/cookie defaults. The owner admin must be able to configure store name/logo/colors/theme/layout/currency/language/contact details, catalog, stock, shipping, and taxes. All buyer-specific integrations must be configured from dedicated owner-only Admin Panel screens without routine source-code or .env edits. Telegram settings must include bot token, chat ID, per-event notification toggles, enable/disable, test-message action and explicit Not configured/Configured/Connection failed status; missing credentials keep it disabled and no fake success is allowed. Google OAuth settings must include Client ID, Client Secret, Redirect/Callback URL, enable/disable and setup status; missing credentials keep OAuth disabled while ordinary login continues. Payment settings must allow each provider to be independently configured with display name, enabled/disabled, sandbox/live mode, API endpoint, merchant/account ID, API key, API secret, signing/webhook secret, currency, return URL and webhook URL. Encrypt secrets at rest, mask them, preserve saved values when blank secret fields are submitted, and never expose them to browser JS, HTML responses, logs or audit metadata. Show actionable validation and connection-test results. Missing or undocumented credentials leave integrations inactive/pending, never simulate successful connections or payments. The sub-admin must only view/update permitted order fields; enforce this on every route and policy. Encrypt integration/payment credentials at rest, mask secrets in admin UI, never expose secrets to browser JS or logs. Payment adapters must verify webhook signatures server-side, amount/currency/order, idempotency and atomic updates. For unconfigured providers, expose a clear disabled/pending status and safe manual/offline payment option rather than pretending online payment works. Never invent a provider API or claim a real payment integration without official docs and sandbox credentials; keep provider setup disabled/pending until configured. Never include real credentials, binaries, vendor, node_modules, .git, .env, or generated secrets. Include meaningful feature tests for storefront, admin/subadmin authorization, products/JSON chat, Telegram settings, Google OAuth, checkout, and payment webhooks. CI must run composer validate, composer install, php -l and php artisan test. Do not execute generated PHP on this builder server. Return complete files only, no markdown fences.";
-    // Generate the Laravel application in eleven bounded modules to reduce
-    // truncation risk and keep each provider response within a practical output budget.
+    // Generate the Laravel application in thirteen bounded modules. The former
+    // final feature-test batch is split in two; the first eleven modules stay
+    // unchanged so an in-progress legacy checkpoint can resume without redoing work.
     // Keep each response bounded so Gemini/Groq cannot truncate a whole application batch.
     $generationBatches = [
         [
@@ -1028,11 +1039,26 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         ],
         [
             'name'=>'feature_tests',
-            'paths'=>['tests/Feature/*'],
-            'scope'=>'Build meaningful Laravel feature tests for storefront, admin/sub-admin authorization, product assistant, payment webhook, Google OAuth, Telegram settings, checkout, payment gateway and category/inventory workflows. Tests must match the previously generated routes, models and services.'
+            'paths'=>[
+                'tests/Feature/StorefrontTest.php','tests/Feature/AdminAuthorizationTest.php',
+                'tests/Feature/SubAdminAuthorizationTest.php','tests/Feature/CheckoutTest.php',
+                'tests/Feature/CategoryInventoryTest.php'
+            ],
+            'scope'=>'Build meaningful Laravel feature tests for storefront, owner admin/sub-admin authorization, checkout and category/inventory workflows. Tests must match the previously generated routes, models and services.'
+        ],
+        [
+            'name'=>'feature_tests_integrations',
+            'paths'=>[
+                'tests/Feature/ProductAssistantTest.php','tests/Feature/PaymentWebhookTest.php',
+                'tests/Feature/GoogleOAuthTest.php','tests/Feature/TelegramSettingsTest.php',
+                'tests/Feature/PaymentGatewayTest.php'
+            ],
+            'scope'=>'Build meaningful Laravel feature tests for Gemini product assistant/chat, secure payment webhooks and gateway behavior, Google OAuth and Telegram settings. Tests must match the previously generated routes, models and services.'
         ]
     ];
     $allGeneratedFiles = [];
+    $checkpointPlan = 'legacy-12-batches';
+    $savedCompletedBatch = -1;
     $previewId = bin2hex(random_bytes(12));
     $fileShas = [];
     $githubToken = envv('NIRA_GITHUB_TOKEN');
@@ -1047,6 +1073,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         try {
             $saved=checkpoint_load_local($resumeId,$promptHash);
             $allGeneratedFiles=$saved['files']; $previewId=$saved['preview_id']; $startBatch=$saved['completed_batch']+1;
+            $checkpointPlan=(string)($saved['batch_plan']??'legacy-12-batches'); $savedCompletedBatch=(int)$saved['completed_batch'];
         } catch(Throwable $e) { respond(422,['error'=>'Could not resume local checkpoint: '.$e->getMessage()]); }
     } else {
         $startBatch=0;
@@ -1056,6 +1083,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                 $saved=checkpoint_load_github($checkpoint,$promptHash,$githubToken);
                 $allGeneratedFiles=$saved['files']; $fileShas=$saved['file_shas']; $previewId=$saved['preview_id'];
                 $startBatch=$saved['completed_batch']+1; $resumeStorage='private_github_checkpoint';
+                $checkpointPlan=(string)($saved['batch_plan']??'legacy-12-batches'); $savedCompletedBatch=(int)$saved['completed_batch'];
             } catch(Throwable $e) {
                 error_log('[NIRA_BUILDER_CHECKPOINT] GitHub checkpoint unavailable; using local fallback: '.substr($e->getMessage(),0,300));
                 $checkpoint=null; $resumeStorage='local_ephemeral';
@@ -1065,18 +1093,22 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             respond(422,['error'=>'This resume ID needs the private GitHub checkpoint token or its local checkpoint file.']);
         }
     }
+    // A legacy checkpoint that completed all 12 old batches already contains
+    // every test file; continue to validation instead of regenerating duplicates.
+    // A legacy checkpoint at batch 11 or earlier resumes into the first split test batch.
+    if ($checkpointPlan === 'legacy-12-batches' && $savedCompletedBatch >= 11) $startBatch = 13;
     $GLOBALS['NIRA_RESUME_STORAGE']=$resumeStorage;
     $GLOBALS['NIRA_RESUME_ID']=$resumeId;
     if ($allGeneratedFiles) save_preview_snapshot($previewId, $allGeneratedFiles);
     $batchTotal=count($generationBatches);
     progress_event('progress',['stage'=>'checkpoint_ready','resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
         'batch'=>min($startBatch+1,$batchTotal),'total_batches'=>$batchTotal,
-        'percent'=>5+(int)(($startBatch/$batchTotal)*70),'files_created'=>count($allGeneratedFiles),
+        'percent'=>generation_progress_percent($startBatch),'files_created'=>count($allGeneratedFiles),
         'message'=>$startBatch>0?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে':'প্রজেক্ট তৈরি শুরু হচ্ছে']);
     for($batchIndex=$startBatch;$batchIndex<$batchTotal;$batchIndex++) {
         $batch=$generationBatches[$batchIndex];
         progress_event('progress',['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,'stage'=>$batch['name'],
-            'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)(($batchIndex/$batchTotal)*70),
+            'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>generation_progress_percent($batchIndex),
             'files_created'=>count($allGeneratedFiles),'message'=>'ব্যাচ '.$batchIndex+1 .'/'.$batchTotal.' তৈরি হচ্ছে']);
         $contractContext=generation_contract_context($allGeneratedFiles,$batch['name']);
         $batchText=$system."\n\nGENERATION BATCH: ".$batch['name'].
@@ -1149,7 +1181,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         }
         save_preview_snapshot($previewId,$allGeneratedFiles);
         progress_event('progress',['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,'stage'=>$batch['name'].'_complete',
-            'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>5+(int)((($batchIndex+1)/$batchTotal)*70),
+            'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>generation_progress_percent($batchIndex+1),
             'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,
             'preview_url'=>'/preview?id='.$previewId.'&view=storefront',
             'preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),
