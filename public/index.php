@@ -1254,21 +1254,51 @@ SH;
             break;
         } catch (Throwable $validationError) {
             $validationMessage = $validationError->getMessage();
-            if ($repairAttempt >= 8
-                || !preg_match('/Laravel E-commerce output is missing required file: ([a-zA-Z0-9._\\/-]+)/', $validationMessage, $missingMatch)) {
+            if ($repairAttempt >= 8) {
                 respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$validationMessage]);
             }
-            $missingPath = clean_name($missingMatch[1]);
+            $repairKind = 'file';
+            $repairInstruction = '';
+            if (preg_match('/Laravel E-commerce output is missing required file: ([a-zA-Z0-9._\\/-]+)/', $validationMessage, $missingMatch)) {
+                $missingPath = clean_name($missingMatch[1]);
+                $repairInstruction = 'Create the exact missing Laravel file.';
+            } elseif (str_contains($validationMessage, 'Laravel project is missing required MySQL migrations.')) {
+                $repairKind = 'migration';
+                $neededMigrations = ['create_products','create_categories','create_orders','create_order_items','create_settings','create_roles'];
+                $missingMigration = null;
+                foreach ($neededMigrations as $migrationSlug) {
+                    $found = false;
+                    foreach (array_keys($allGeneratedFiles) as $existingPath) {
+                        if (str_starts_with($existingPath, 'database/migrations/') && str_contains($existingPath, $migrationSlug)) { $found = true; break; }
+                    }
+                    if (!$found) { $missingMigration = $migrationSlug; break; }
+                }
+                if ($missingMigration === null) {
+                    $neededMigrations = ['create_carts','create_cart_items','create_inventory_movements','create_payment_transactions','create_audit_events'];
+                    foreach ($neededMigrations as $migrationSlug) {
+                        $found = false;
+                        foreach (array_keys($allGeneratedFiles) as $existingPath) {
+                            if (str_starts_with($existingPath, 'database/migrations/') && str_contains($existingPath, $migrationSlug)) { $found = true; break; }
+                        }
+                        if (!$found) { $missingMigration = $migrationSlug; break; }
+                    }
+                }
+                if ($missingMigration === null) respond(422, ['error'=>'Laravel migration validation failed; no missing migration path could be identified.']);
+                $missingPath = 'database/migrations/'.date('Y_m_d_His').sprintf('_%02d', $repairAttempt+1).'_'.$missingMigration.'_table.php';
+                $repairInstruction = 'Create one complete Laravel anonymous migration file for the required MySQL table '.$missingMigration.'. Use Schema::create, correct columns, indexes, foreign keys and down() rollback. Match the existing models and other migrations.';
+            } else {
+                respond(422, ['error'=>'Generated output did not pass Laravel validation: '.$validationMessage]);
+            }
             if (isset($allGeneratedFiles[$missingPath])) {
-                respond(422, ['error'=>'Laravel validation reported an existing file as missing: '.$missingPath]);
+                respond(422, ['error'=>'Laravel repair path already exists: '.$missingPath]);
             }
             progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
                 'stage'=>'repair_missing_file','percent'=>80,'files_created'=>count($allGeneratedFiles),
                 'message'=>'একটি অনুপস্থিত Laravel ফাইল তৈরি ও যাচাই করা হচ্ছে: '.$missingPath]);
 
-            $repairContext = generation_contract_context($allGeneratedFiles, 'storefront_views');
+            $repairContext = generation_contract_context($allGeneratedFiles, $repairKind === 'migration' ? 'models_and_policies' : 'storefront_views');
             $repairPrompt = $system.
-                "\n\nREPAIR TASK: Create exactly one missing file for the already-generated Laravel e-commerce project.".
+                "\n\nREPAIR TASK: ".$repairInstruction.
                 "\nEXACT REQUIRED PATH: ".$missingPath.
                 "\nReturn JSON only: {\"files\":[{\"path\":\"".$missingPath."\",\"content\":\"complete file content\"}]}.".
                 "\nDo not return any other path. Do not change or repeat existing files. Use the existing routes, models, controllers, layout and design consistently.".
