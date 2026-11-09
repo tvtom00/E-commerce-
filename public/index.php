@@ -1298,6 +1298,7 @@ SH;
                 save_preview_snapshot($previewId, $allGeneratedFiles);
                 $runtimeFiles = [];
                 foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
+                    if (in_array($generatedPath, ['Dockerfile','docker/entrypoint.sh'], true)) continue;
                     $runtimeFiles[] = ['path'=>$generatedPath,'content'=>$generatedContent];
                 }
                 $runtimeFiles[] = ['path'=>'Dockerfile','content'=>$dockerContent];
