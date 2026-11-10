@@ -1282,7 +1282,7 @@ SH;
             break;
         } catch (Throwable $validationError) {
             $validationMessage = $validationError->getMessage();
-            if ($repairAttempt >= 7) {
+            if ($repairAttempt >= 8) {
                 respond(422, ['error'=>'Automatic Laravel repair reached its safety limit.','detail'=>$validationMessage,'repairs'=>$repairHistory]);
             }
 
@@ -1292,8 +1292,26 @@ SH;
             $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
             $fileList = implode("\n", array_keys($allGeneratedFiles));
             $context = "";
-            $contextBudget = 10000; // Keep repair input below Groq's 8K TPM request ceiling after system/prompt overhead.
+            $contextBudget = 10000; // Keep repair input bounded for smaller AI providers.
+            // Put the exact files implicated by the validator first; otherwise the
+            // context budget may omit the settings view/controller entirely.
+            $priorityContextPaths = [];
+            if (stripos($validationMessage, 'settings section: theme') !== false) {
+                $priorityContextPaths = [
+                    'resources/views/admin/settings/index.blade.php',
+                    'app/Http/Controllers/Admin/SettingsController.php',
+                    'routes/web.php',
+                    'resources/views/layouts/admin.blade.php',
+                ];
+            }
+            $contextOrder = [];
+            foreach ($priorityContextPaths as $priorityPath) {
+                if (isset($allGeneratedFiles[$priorityPath])) $contextOrder[$priorityPath] = $allGeneratedFiles[$priorityPath];
+            }
             foreach ($allGeneratedFiles as $contextPath=>$contextContent) {
+                if (!isset($contextOrder[$contextPath])) $contextOrder[$contextPath] = $contextContent;
+            }
+            foreach ($contextOrder as $contextPath=>$contextContent) {
                 if (in_array($contextPath, $protectedPaths, true)) continue;
                 $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 1800);
                 if (strlen($context) + strlen($entry) > $contextBudget) break;
@@ -1316,6 +1334,7 @@ SH;
                 "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
                 "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
                 "\nFor content validation errors, fix the actual implementation rather than inserting placeholder text or bypassing validation.".
+                "\nIf the diagnostic names the Owner Admin Panel theme settings section, inspect and update BOTH resources/views/admin/settings/index.blade.php and app/Http/Controllers/Admin/SettingsController.php. Add a real configurable theme section with a CSRF-protected form, existing route/action names, validated theme fields, persistence through the existing settings storage/model, and values loaded back into the form. Preserve all existing Telegram, Google, payment, shipping and tax settings and their behavior; do not replace the whole settings page with a reduced version.".
                 "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
                 "\nUSER REQUEST:\n".$prompt.
                 "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context;
