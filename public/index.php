@@ -717,7 +717,7 @@ function checkpoint_repository(string $resumeId, string $token): array {
 }
 
 function checkpoint_empty(): array {
-    return ['files'=>[],'file_shas'=>[],'completed_batch'=>-1,'preview_id'=>bin2hex(random_bytes(12))];
+    return ['files'=>[],'file_shas'=>[],'completed_batch'=>-1,'preview_id'=>bin2hex(random_bytes(12)),'repair_state'=>['completed_attempts'=>0,'last_validation_error'=>'']];
 }
 
 function checkpoint_load_local(string $resumeId, string $promptHash): array {
@@ -736,7 +736,8 @@ function checkpoint_load_local(string $resumeId, string $promptHash): array {
     if($total>MAX_TOTAL_BYTES) throw new RuntimeException('Saved checkpoint exceeds the project source limit.');
     return ['files'=>$files,'file_shas'=>[],'completed_batch'=>(int)($saved['completed_batch']??-1),
         'batch_plan'=>(string)($saved['batch_plan']??'legacy-12-batches'),
-        'preview_id'=>(string)($saved['preview_id']??bin2hex(random_bytes(12)))];
+        'preview_id'=>(string)($saved['preview_id']??bin2hex(random_bytes(12))),
+        'repair_state'=>is_array($saved['repair_state']??null)?$saved['repair_state']:['completed_attempts'=>0,'last_validation_error'=>'']];
 }
 
 function checkpoint_load_github(array $cp, string $hash, string $token): array {
@@ -766,20 +767,21 @@ function checkpoint_load_github(array $cp, string $hash, string $token): array {
     }
     return ['files'=>$files,'file_shas'=>$fileShas,'completed_batch'=>(int)($meta['completed_batch']??-1),
         'batch_plan'=>(string)($meta['batch_plan']??'legacy-12-batches'),
-        'preview_id'=>(string)($meta['preview_id']??bin2hex(random_bytes(12)))];
+        'preview_id'=>(string)($meta['preview_id']??bin2hex(random_bytes(12))),
+        'repair_state'=>is_array($meta['repair_state']??null)?$meta['repair_state']:['completed_attempts'=>0,'last_validation_error'=>'']];
 }
 
-function checkpoint_save_local(string $id, array $files, int $batch, string $previewId, string $hash, string $project): void {
+function checkpoint_save_local(string $id, array $files, int $batch, string $previewId, string $hash, string $project, array $repairState = []): void {
     $path=checkpoint_local_path($id);
     $json=json_encode(['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,
-        'batch_plan'=>'13-batches-v1','preview_id'=>$previewId,'files'=>$files,'updated_at'=>gmdate('c')],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        'batch_plan'=>'13-batches-v1','preview_id'=>$previewId,'files'=>$files,'repair_state'=>$repairState,'updated_at'=>gmdate('c')],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
     if(!is_string($json)) throw new RuntimeException('Could not encode local generation checkpoint.');
     $tmp=$path.'.tmp';
     if(file_put_contents($tmp,$json,LOCK_EX)===false||!rename($tmp,$path)) { @unlink($tmp); throw new RuntimeException('Could not save local generation checkpoint.'); }
 }
 
 function checkpoint_save_github(array $cp, array $newFiles, array $fileShas, int $batch,
-    string $previewId, string $hash, string $project, string $token): array {
+    string $previewId, string $hash, string $project, string $token, array $repairState = []): array {
     $owner=$cp['owner']; $repo=$cp['repo']; $branch=$cp['branch'];
     $ref=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/ref/heads/'.rawurlencode($branch),$token);
     $parent=(string)($ref['object']['sha']??'');
@@ -790,7 +792,7 @@ function checkpoint_save_github(array $cp, array $newFiles, array $fileShas, int
         $fileShas[$path]=$blob['sha']; $items[]=['path'=>$path,'mode'=>'100644','type'=>'blob','sha'=>$blob['sha']];
     }
     $meta=['schema'=>1,'project'=>$project,'prompt_hash'=>$hash,'completed_batch'=>$batch,'batch_plan'=>'13-batches-v1','preview_id'=>$previewId,
-        'files'=>$fileShas,'updated_at'=>gmdate('c')];
+        'files'=>$fileShas,'repair_state'=>$repairState,'updated_at'=>gmdate('c')];
     $mb=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/blobs',$token,['content'=>json_encode($meta,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'encoding'=>'utf-8']);
     $items[]=['path'=>'.nira-checkpoint.json','mode'=>'100644','type'=>'blob','sha'=>$mb['sha']];
     $tree=github_api('POST','/repos/'.$owner.'/'.$repo.'/git/trees',$token,['base_tree'=>$pc['tree']['sha'],'tree'=>$items]);
@@ -1064,6 +1066,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $fileShas = [];
     $githubToken = envv('NIRA_GITHUB_TOKEN');
     $checkpoint = null;
+    $repairState = ['completed_attempts'=>0,'last_validation_error'=>''];
     $resumeStorage = 'local_ephemeral';
     $localCheckpoint = checkpoint_local_path($resumeId);
     $lockDir = dirname($localCheckpoint).'/locks';
@@ -1075,6 +1078,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             $saved=checkpoint_load_local($resumeId,$promptHash);
             $allGeneratedFiles=$saved['files']; $previewId=$saved['preview_id']; $startBatch=$saved['completed_batch']+1;
             $checkpointPlan=(string)($saved['batch_plan']??'legacy-12-batches'); $savedCompletedBatch=(int)$saved['completed_batch'];
+            $repairState=is_array($saved['repair_state']??null)?$saved['repair_state']:$repairState;
         } catch(Throwable $e) { respond(422,['error'=>'Could not resume local checkpoint: '.$e->getMessage()]); }
     } else {
         $startBatch=0;
@@ -1085,6 +1089,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                 $allGeneratedFiles=$saved['files']; $fileShas=$saved['file_shas']; $previewId=$saved['preview_id'];
                 $startBatch=$saved['completed_batch']+1; $resumeStorage='private_github_checkpoint';
                 $checkpointPlan=(string)($saved['batch_plan']??'legacy-12-batches'); $savedCompletedBatch=(int)$saved['completed_batch'];
+            $repairState=is_array($saved['repair_state']??null)?$saved['repair_state']:$repairState;
             } catch(Throwable $e) {
                 error_log('[NIRA_BUILDER_CHECKPOINT] GitHub checkpoint unavailable; using local fallback: '.substr($e->getMessage(),0,300));
                 $checkpoint=null; $resumeStorage='local_ephemeral';
@@ -1172,9 +1177,9 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         }
         try {
             if($checkpoint!==null) {
-                $fileShas=checkpoint_save_github($checkpoint,$batchNewFiles,$fileShas,$batchIndex,$previewId,$promptHash,$name?:'website',$githubToken);
+                $fileShas=checkpoint_save_github($checkpoint,$batchNewFiles,$fileShas,$batchIndex,$previewId,$promptHash,$name?:'website',$githubToken,$repairState);
             } else {
-                checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex,$previewId,$promptHash,$name?:'website');
+                checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex,$previewId,$promptHash,$name?:'website',$repairState);
             }
         } catch(Throwable $e) {
             error_log('[NIRA_BUILDER_CHECKPOINT] batch='.$batch['name'].' error='.substr(preg_replace('/\s+/',' ',$e->getMessage()),0,500));
@@ -1250,7 +1255,8 @@ SH;
     // exact path from the saved project context. Never restart completed batches.
     $validatedFiles = null;
     $repairHistory = [];
-    for ($repairAttempt = 0; $repairAttempt < 8; $repairAttempt++) {
+    $completedRepairAttempts = max(0, min(8, (int)($repairState['completed_attempts'] ?? 0)));
+    for ($repairAttempt = $completedRepairAttempts; $repairAttempt < 8; $repairAttempt++) {
         try {
             $validatedFiles = validate_laravel_project($result['files']);
             break;
@@ -1276,6 +1282,7 @@ SH;
             $repairHistory[] = ['attempt'=>$repairAttempt+1,'error'=>substr($validationMessage,0,500)];
             progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
                 'stage'=>'auto_repair','percent'=>80,'files_created'=>count($allGeneratedFiles),
+                'repair_attempt'=>$repairAttempt+1,'repair_completed_attempts'=>$completedRepairAttempts,
                 'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/8)']);
 
             $repairPrompt = $system.
@@ -1334,12 +1341,20 @@ SH;
                 foreach ($allGeneratedFiles as $sourceContent) $totalRepairBytes += strlen($sourceContent);
                 if ($totalRepairBytes > MAX_TOTAL_BYTES) throw new RuntimeException('Automatic repair would exceed the project total size limit.');
 
+                $nextRepairState = [
+                    'completed_attempts'=>$repairAttempt+1,
+                    'last_validation_error'=>substr($validationMessage,0,500),
+                ];
                 if ($checkpoint !== null) {
                     $fileShas = checkpoint_save_github($checkpoint, $changedFiles, $fileShas,
-                        max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website', $githubToken);
+                        max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website', $githubToken, $nextRepairState);
                 } else {
-                    checkpoint_save_local($resumeId, $allGeneratedFiles, max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website');
+                    checkpoint_save_local($resumeId, $allGeneratedFiles, max(0, $batchTotal-1), $previewId, $promptHash, $name?:'website', $nextRepairState);
                 }
+                // Count an attempt only after its changed files and progress state
+                // have been committed together to the durable checkpoint.
+                $repairState = $nextRepairState;
+                $completedRepairAttempts = $repairAttempt+1;
                 save_preview_snapshot($previewId, $allGeneratedFiles);
                 $runtimeFiles = [];
                 foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
