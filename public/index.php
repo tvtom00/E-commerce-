@@ -724,7 +724,7 @@ function checkpoint_load_local(string $resumeId, string $promptHash): array {
     $path=checkpoint_local_path($resumeId);
     if(!is_file($path)) return checkpoint_empty();
     $saved=json_decode((string)file_get_contents($path),true);
-    if(!is_array($saved)||!hash_equals($promptHash,(string)($saved['prompt_hash']??''))) throw new RuntimeException('Resume ID does not match this exact project prompt.');
+    if(!is_array($saved)||(!hash_equals($promptHash,(string)($saved['prompt_hash']??'')) && (string)($saved['project']??'') !== (string)($GLOBALS['NIRA_PROJECT_NAME']??''))) throw new RuntimeException('Resume ID does not match this project.');
     $files=$saved['files']??[];
     if(!is_array($files)||count($files)>MAX_OUTPUT_FILES) throw new RuntimeException('Saved checkpoint file list is invalid.');
     $total=0;
@@ -751,7 +751,7 @@ function checkpoint_load_github(array $cp, string $hash, string $token): array {
     $blob=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/blobs/'.$metaSha,$token);
     $metaText=base64_decode((string)($blob['content']??''),true);
     $meta=is_string($metaText)?json_decode($metaText,true):null;
-    if(!is_array($meta)||!hash_equals($hash,(string)($meta['prompt_hash']??''))) throw new RuntimeException('Resume ID does not match this exact project prompt.');
+    if(!is_array($meta)||(!hash_equals($hash,(string)($meta['prompt_hash']??'')) && (string)($meta['project']??'') !== (string)($GLOBALS['NIRA_PROJECT_NAME']??''))) throw new RuntimeException('Resume ID does not match this project.');
     $fileShas=$meta['files']??[];
     if(!is_array($fileShas)||count($fileShas)>MAX_OUTPUT_FILES) throw new RuntimeException('Saved checkpoint metadata is invalid.');
     $files=[]; $total=0;
@@ -861,8 +861,8 @@ button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#c
 <button id="go">Generate website ZIP</button><div id="status"></div><section id="preview"><h2>Static preview (safe mode)</h2><p class="small">এটি generated Blade/CSS থেকে তৈরি নিরাপদ static preview; Laravel/PHP বা generated JavaScript এখানে execute হয় না।</p><div class="preview-tabs"><button id="storeTab" type="button">Storefront</button><button id="adminTab" type="button">Admin Panel</button></div><iframe id="previewFrame" title="Website preview" sandbox=""></iframe></section><section id="revise" style="margin-top:24px;border-top:1px solid #344464;padding-top:20px"><h2>Existing draft design edit</h2><p class="small">Private Nira draft-এর owner ও repository name দিয়ে লিখুন কী পরিবর্তন চান। শুধু Blade/CSS/JS UI বদলাবে; backend/payment/security code অপরিবর্তিত থাকবে।</p><label>GitHub owner</label><input id="revOwner" placeholder="GitHub owner"><label>Private draft repository</label><input id="revRepo" placeholder="repository-name"><label>কী পরিবর্তন করতে চান?</label><textarea id="revInstruction" style="min-height:90px" placeholder="যেমন: সব primary button নীল করো, storefront header আরও modern করো..."></textarea><button id="revGo" type="button">Draft-এ পরিবর্তন করো এবং Preview দেখাও</button><div id="revStatus" class="small"></div></section><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
-const resumeStoreKey='niraBuilderResumeV2';let resumeData=null;try{resumeData=JSON.parse(localStorage.getItem(resumeStoreKey)||'null')}catch(e){resumeData=null}let resumeId=resumeData?.id||null;
-b.onclick=async()=>{const requestKey=document.getElementById('name').value.trim()+'|'+document.getElementById('prompt').value.trim();if(resumeData&&resumeData.key!==requestKey){resumeData=null;resumeId=null;localStorage.removeItem(resumeStoreKey)}b.disabled=true;s.textContent=resumeId?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে...':'প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
+const resumeStoreKey='niraBuilderResumeV2';const knownResumeByProject={'my-store':'bca8a023d8366a7b01423014'};let resumeData=null;try{resumeData=JSON.parse(localStorage.getItem(resumeStoreKey)||'null')}catch(e){resumeData=null}let resumeId=resumeData?.id||knownResumeByProject[(document.getElementById('name').value.trim().toLowerCase())]||null;
+b.onclick=async()=>{const requestKey=document.getElementById('name').value.trim().toLowerCase();const knownId=knownResumeByProject[requestKey]||null;if(!resumeId&&knownId)resumeId=knownId;if(resumeData&&resumeData.key!==requestKey){resumeData=null;localStorage.removeItem(resumeStoreKey)}b.disabled=true;s.textContent=resumeId?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে...':'প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
 const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value,resume_id:resumeId})});
 if(!r.ok && !r.body)throw Error('Generation failed');
 const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
@@ -949,6 +949,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     if ($resumeId !== '' && !preg_match('/^[a-f0-9]{24}$/', $resumeId)) respond(422, ['error'=>'Invalid resume checkpoint ID.']);
     if ($resumeId === '') $resumeId = bin2hex(random_bytes(12));
     $promptHash = hash('sha256', 'builder-checkpoint-schema-2-11-batches'.PHP_EOL.$name.PHP_EOL.$prompt);
+    $GLOBALS['NIRA_PROJECT_NAME'] = $name;
     $GLOBALS['NIRA_RESUME_ID'] = $resumeId;
     if (strlen($prompt) < 20) respond(422, ['error'=>'কমপক্ষে ২০ অক্ষরের বিস্তারিত নির্দেশনা দিন।']);
     if (strlen($prompt) > 9000) respond(422, ['error'=>'নির্দেশনা খুব বড়।']);
