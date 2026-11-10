@@ -399,11 +399,12 @@ function validate_laravel_project(array $rawFiles): array {
         if (!$found) throw new RuntimeException('Laravel project is missing persistent data migration: '.$group);
     }
     $databaseConfig = $files['config/database.php'];
+    // Laravel's standard database config uses DB_URL. Some hosts expose
+    // DATABASE_URL instead; accept either variable as a valid URL binding.
+    // MySQL and PostgreSQL support are checked independently above.
     if (!str_contains(strtolower($databaseConfig), 'pgsql')
-        || !str_contains($databaseConfig, 'DB_URL')
-        || !str_contains($databaseConfig, 'DATABASE_URL')
-        || !preg_match('/[\x27"]url[\x27"]\\s*=>\\s*env\\([\x27"]DB_URL[\x27"]/', $databaseConfig)) {
-        throw new RuntimeException('Database config must support MySQL, PostgreSQL and Laravel DB_URL.');
+        || !preg_match('/[\x27"]url[\x27"]\\s*=>\\s*env\\([\x27"](DB_URL|DATABASE_URL)[\x27"]/', $databaseConfig)) {
+        throw new RuntimeException('Database config must support MySQL, PostgreSQL and Laravel DB_URL or DATABASE_URL.');
     }
     $envExample = $files['.env.example'];
     if (!preg_match('/(?m)^DB_CONNECTION=mysql\\s*$/', $envExample)) {
