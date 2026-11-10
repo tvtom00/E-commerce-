@@ -111,10 +111,16 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
     $sawJsonFormatFailure = false;
     foreach ($providers as $provider) {
         $requestPrompt = $prompt;
+        $groqRetryOutputTokens = null;
         for ($attempt = 1; $attempt <= 3; $attempt++) {
             // Reduce the response budget on retries so invalid/truncated JSON gets
-            // a genuinely smaller second and third attempt.
+            // a genuinely smaller second and third attempt. Groq TPM includes both
+            // prompt and completion tokens, so its retry budget must be allowed
+            // below 2000 when the provider reports a smaller remaining allowance.
             $attemptOutputTokens = max(2000, (int)floor($maxOutputTokens / (2 ** ($attempt - 1))));
+            if ($provider['name'] === 'Groq' && is_int($groqRetryOutputTokens)) {
+                $attemptOutputTokens = min($attemptOutputTokens, $groqRetryOutputTokens);
+            }
             if ($provider['name'] === 'OpenAI' || $provider['name'] === 'Groq') {
                 $url = $provider['name'] === 'Groq' ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
                 $model = $provider['name'] === 'Groq' ? envv('GROQ_MODEL', 'openai/gpt-oss-120b') : envv('OPENAI_MODEL', 'gpt-4.1-mini');
@@ -250,7 +256,27 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             // with the automatically reduced token budget on the next attempt.
             if ($provider['name'] === 'Groq' && $code === 429 && $attempt < 3) {
                 $retryDelay = ai_retry_delay_seconds($answer, 20);
-                error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=wait_and_retry status=429 delay='.$retryDelay.' next_output_tokens='.max(2000,(int)floor($maxOutputTokens/(2 ** $attempt))));
+                // Groq TPM errors report the rolling-window limit, tokens already
+                // used, and requested completion tokens. Reserve 25% headroom for
+                // accounting variance and retry with only the remaining safe budget.
+                $tpmMessage = (string)($answer['error']['message'] ?? '');
+                if (preg_match('/Limit\\s*(\\d+)\\s*,\\s*Used\\s*(\\d+)\\s*,\\s*Requested\\s*(\\d+)/i', $tpmMessage, $tpm)) {
+                    $remainingTpm = max(0, (int)$tpm[1] - (int)$tpm[2]);
+                    // Reserve capacity for the prompt itself, then keep 25% headroom.
+                    // A rough 4-characters-per-token estimate is deliberately conservative
+                    // for the mixed English/code prompts used by the Builder.
+                    $estimatedPromptTokens = (int)ceil(strlen($requestPrompt) / 4);
+                    $completionAllowance = max(0, $remainingTpm - $estimatedPromptTokens);
+                    $safeTpmBudget = (int)floor($completionAllowance * 0.75);
+                    if ($safeTpmBudget < 512) {
+                        error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=skip_retry_insufficient_tpm remaining='.$remainingTpm.' estimated_prompt='.$estimatedPromptTokens);
+                        break;
+                    }
+                    $groqRetryOutputTokens = min($attemptOutputTokens - 1, $safeTpmBudget);
+                } else {
+                    $groqRetryOutputTokens = max(512, (int)floor($attemptOutputTokens * 0.5));
+                }
+                error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=wait_and_retry status=429 delay='.$retryDelay.' next_output_tokens='.$groqRetryOutputTokens);
                 sleep($retryDelay);
                 continue;
             }
