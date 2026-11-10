@@ -1276,7 +1276,7 @@ SH;
     $validatedFiles = null;
     $repairHistory = [];
     $completedRepairAttempts = max(0, min(8, (int)($repairState['completed_attempts'] ?? 0)));
-    for ($repairAttempt = $completedRepairAttempts; $repairAttempt < 8; $repairAttempt++) {
+    for ($repairAttempt = $completedRepairAttempts; $repairAttempt <= 8; $repairAttempt++) {
         try {
             $validatedFiles = validate_laravel_project($result['files']);
             break;
