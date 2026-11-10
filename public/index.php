@@ -262,8 +262,17 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 $tpmMessage = (string)($answer['error']['message'] ?? '');
                 if (preg_match('/Limit\\s*(\\d+)\\s*,\\s*Used\\s*(\\d+)\\s*,\\s*Requested\\s*(\\d+)/i', $tpmMessage, $tpm)) {
                     $remainingTpm = max(0, (int)$tpm[1] - (int)$tpm[2]);
-                    $safeTpmBudget = (int)floor($remainingTpm * 0.75);
-                    $groqRetryOutputTokens = max(512, min($attemptOutputTokens - 1, $safeTpmBudget));
+                    // Reserve capacity for the prompt itself, then keep 25% headroom.
+                    // A rough 4-characters-per-token estimate is deliberately conservative
+                    // for the mixed English/code prompts used by the Builder.
+                    $estimatedPromptTokens = (int)ceil(strlen($requestPrompt) / 4);
+                    $completionAllowance = max(0, $remainingTpm - $estimatedPromptTokens);
+                    $safeTpmBudget = (int)floor($completionAllowance * 0.75);
+                    if ($safeTpmBudget < 512) {
+                        error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=skip_retry_insufficient_tpm remaining='.$remainingTpm.' estimated_prompt='.$estimatedPromptTokens);
+                        break;
+                    }
+                    $groqRetryOutputTokens = min($attemptOutputTokens - 1, $safeTpmBudget);
                 } else {
                     $groqRetryOutputTokens = max(512, (int)floor($attemptOutputTokens * 0.5));
                 }
