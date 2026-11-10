@@ -245,6 +245,15 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             // whole Builder request for up to 120 seconds. Move to the next
             // configured model/provider immediately; the durable checkpoint
             // remains untouched if every provider is unavailable.
+            // Gemini capacity errors should fail over immediately. Groq 429s
+            // include a rolling TPM reset time; wait for that window and retry
+            // with the automatically reduced token budget on the next attempt.
+            if ($provider['name'] === 'Groq' && $code === 429 && $attempt < 3) {
+                $retryDelay = ai_retry_delay_seconds($answer, 20);
+                error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=wait_and_retry status=429 delay='.$retryDelay.' next_output_tokens='.max(2000,(int)floor($maxOutputTokens/(2 ** $attempt))));
+                sleep($retryDelay);
+                continue;
+            }
             if (in_array($code, [429,503], true)) {
                 error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' action=failover status='.$code);
                 break;
