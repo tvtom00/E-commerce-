@@ -241,8 +241,16 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             $errors[] = $provider['name'].' '.$model.' HTTP '.$code.': '.substr($message, 0, 500);
             error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' result=http_error status='.$code.' attempt='.$attempt.' message='.substr($message, 0, 500));
             $retryable = ($body === false) || in_array($code, [429,500,502,503,504], true) || $jsonFormatFailure;
+            // A provider 429/503 is a capacity signal, not a reason to hold the
+            // whole Builder request for up to 120 seconds. Move to the next
+            // configured model/provider immediately; the durable checkpoint
+            // remains untouched if every provider is unavailable.
+            if (in_array($code, [429,503], true)) {
+                error_log('[NIRA_BUILDER_AI] provider='.$provider['name'].' model='.$model.' action=failover status='.$code);
+                break;
+            }
             if (!$retryable || $attempt === 3) break;
-            sleep($jsonFormatFailure ? min(4, 2 ** $attempt) : ai_retry_delay_seconds($answer, $code === 429 ? 45 : ($code === 503 ? 15 : 4)));
+            sleep($jsonFormatFailure ? min(4, 2 ** $attempt) : ai_retry_delay_seconds($answer, 4));
         }
     }
     $failureSummary = 'All configured AI providers failed. '.implode(' | ', $errors);
