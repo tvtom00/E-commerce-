@@ -373,7 +373,9 @@ function validate_laravel_project(array $rawFiles): array {
     foreach ($files as $path => $source) {
         if (str_starts_with($path, 'database/migrations/')) {
             foreach ($migrationNames as $migration) {
-                if (str_contains($path, $migration)) $migrationNames = array_values(array_diff($migrationNames, [$migration]));
+                $matchedMigration = str_contains($path, $migration)
+                    || ($migration === 'create_order_items' && str_contains($path, 'create_orders_and_order_items'));
+                if ($matchedMigration) $migrationNames = array_values(array_diff($migrationNames, [$migration]));
             }
             if (str_starts_with($path, 'database/migrations/') && str_contains($path, 'create_products')) $productMigration = $source;
         }
