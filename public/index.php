@@ -1584,14 +1584,14 @@ SH;
             $repairData = ['patches'=>[]];
             $seenPatchKeys = [];
             $baseRepairInstructions =
-                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\\"patches\\":[{\\"path\\":\\"relative/path\\",\\"find\\":\\"exact existing snippet or empty for new file\\",\\"replace\\":\\"replacement snippet or complete new file\\"}]}. ".
+                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
                 "The complete saved project is scanned locally; this is one numbered slice of its full path/reference report. Never infer that a file is missing from one slice. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
                 "Repair only the diagnosed root cause and directly related wiring. Return zero to 2 minimal patches for this slice. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
                 ($isOrderPolicyDiagnostic
                     ? "For OrderPolicy specifically, repair the EXISTING app/Policies/OrderPolicy.php only. Read its supplied source and authorization dependencies before proposing a patch. Match existing role names and ownership rules; do not grant all users access, assume role names, or create another policy file. If this slice lacks the exact policy source/anchor, return an empty patches array. "
                     : "").
-                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials. If this slice does not contain enough exact evidence for a safe patch, return {\\"patches\\":[]}.".
-                "\\nDIAGNOSTIC: ".substr($validationMessage, 0, 900);
+                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials. If this slice does not contain enough exact evidence for a safe patch, return {\"patches\":[]}.".
+                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 900);
             try {
                 for ($batchIndex = 0; $batchIndex < $batchCount; $batchIndex++) {
                     $scanPart = $scanBatches[$batchIndex] ?? '';
