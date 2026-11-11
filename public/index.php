@@ -117,7 +117,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             // a genuinely smaller second and third attempt. Groq TPM includes both
             // prompt and completion tokens, so its retry budget must be allowed
             // below 2000 when the provider reports a smaller remaining allowance.
-            $attemptOutputTokens = max(2000, (int)floor($maxOutputTokens / (2 ** ($attempt - 1))));
+            $attemptOutputTokens = max(256, (int)floor($maxOutputTokens / (2 ** ($attempt - 1))));
             if ($provider['name'] === 'Groq' && is_int($groqRetryOutputTokens)) {
                 $attemptOutputTokens = min($attemptOutputTokens, $groqRetryOutputTokens);
             }
@@ -341,6 +341,33 @@ function canonical_file_path_key(string $path): string {
  * Build a read-only, whole-project inventory and dependency/reference report.
  * Every saved file is scanned; output is bounded before it reaches the AI prompt.
  */
+/**
+ * Split large diagnostic/source reports into bounded, line-preserving chunks.
+ * A long individual line is hard-split so no request can exceed the context budget.
+ */
+function split_repair_payload_batches(string $text, int $maxChars = 2600): array {
+    $maxChars = max(500, $maxChars);
+    $chunks = [];
+    $current = '';
+    foreach (preg_split('/(?<=\\n)/', $text) ?: [$text] as $line) {
+        while (strlen($line) > $maxChars) {
+            if ($current !== '') {
+                $chunks[] = $current;
+                $current = '';
+            }
+            $chunks[] = substr($line, 0, $maxChars);
+            $line = substr($line, $maxChars);
+        }
+        if ($current !== '' && strlen($current) + strlen($line) > $maxChars) {
+            $chunks[] = $current;
+            $current = '';
+        }
+        $current .= $line;
+    }
+    if ($current !== '' || !$chunks) $chunks[] = $current;
+    return $chunks;
+}
+
 function build_project_scan_report(array $files, string $diagnostic): string {
     // Inspect every saved path/content locally, but send only a bounded index to AI.
     $paths = array_keys($files);
@@ -1550,24 +1577,60 @@ SH;
                 'repair_attempt'=>$repairAttempt+1,'repair_completed_attempts'=>$completedRepairAttempts,
                 'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/'.$maxRepairAttempts.')']);
 
-            $repairPrompt =
+            $scanReport = build_project_scan_report($allGeneratedFiles, $validationMessage);
+            $scanBatches = split_repair_payload_batches($scanReport, 2600);
+            $sourceBatches = split_repair_payload_batches($repairTargetContext, 2600);
+            $batchCount = max(count($scanBatches), count($sourceBatches));
+            $repairData = ['patches'=>[]];
+            $seenPatchKeys = [];
+            $baseRepairInstructions =
                 "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
-                "The full saved project was scanned locally. Use the supplied complete path index and ranked matches to locate existing files before deciding anything is missing. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
-                "Repair only the diagnosed root cause and directly related wiring. Return 1 to 8 minimal patches. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
+                "The complete saved project is scanned locally; this is one numbered slice of its full path/reference report. Never infer that a file is missing from one slice. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
+                "Repair only the diagnosed root cause and directly related wiring. Return zero to 2 minimal patches for this slice. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
                 ($isOrderPolicyDiagnostic
-                    ? "For OrderPolicy specifically, repair the EXISTING app/Policies/OrderPolicy.php only. Read the provided Order, User, OrderController, EnsureRole and route source first. Implement a real Laravel OrderPolicy with the authorization abilities actually used by the project (at minimum viewAny, view, create, update, delete, restore and forceDelete where applicable), matching existing role names and ownership rules. Do not grant all users access, do not assume admin role names, and do not create another policy file. Ensure the patch uses a unique exact anchor copied from the supplied existing policy. "
+                    ? "For OrderPolicy specifically, repair the EXISTING app/Policies/OrderPolicy.php only. Read its supplied source and authorization dependencies before proposing a patch. Match existing role names and ownership rules; do not grant all users access, assume role names, or create another policy file. If this slice lacks the exact policy source/anchor, return an empty patches array. "
                     : "").
-                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials.".
-                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 1200).
-                "\n\nPROJECT SCAN AND COMPLETE PATH INDEX:\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
-                "\n\nRELEVANT EXISTING SOURCE FILES (bounded excerpts; confirm exact anchors):".$repairTargetContext;
-
+                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials. If this slice does not contain enough exact evidence for a safe patch, return {\"patches\":[]}.".
+                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 900);
             try {
-                $repairResult = ai_request_json($repairPrompt, 1800);
-                $repairData = json_decode($repairResult['text'], true);
-                if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
-                    || count($repairData['patches']) < 1 || count($repairData['patches']) > 8) {
-                    throw new RuntimeException('AI repair must return between 1 and 8 minimal patches.');
+                for ($batchIndex = 0; $batchIndex < $batchCount; $batchIndex++) {
+                    $scanPart = $scanBatches[$batchIndex] ?? '';
+                    $sourcePart = $sourceBatches[$batchIndex] ?? '';
+                    $repairPrompt = $baseRepairInstructions.
+                        "\\nBATCH ".($batchIndex+1)." OF ".$batchCount." (independent slice; do not assume omitted context):".
+                        "\\nPROJECT SCAN / PATH INDEX SLICE:\\n".$scanPart.
+                        "\\nRELEVANT EXISTING SOURCE SLICE (authoritative only for exact anchors):\\n".$sourcePart;
+                    error_log('[NIRA_BUILDER_REPAIR] batch='.($batchIndex+1).'/'.$batchCount.' prompt_chars='.strlen($repairPrompt));
+                    $repairResult = ai_request_json($repairPrompt, 700);
+                    $batchData = json_decode($repairResult['text'], true);
+                    if (!is_array($batchData) || !isset($batchData['patches']) || !is_array($batchData['patches'])
+                        || count($batchData['patches']) > 2) {
+                        throw new RuntimeException('AI repair batch '.($batchIndex+1).' returned invalid JSON or more than 2 patches; no patches were applied.');
+                    }
+                    foreach ($batchData['patches'] as $batchPatch) {
+                        if (!is_array($batchPatch) || !isset($batchPatch['path'],$batchPatch['find'],$batchPatch['replace'])
+                            || !is_string($batchPatch['path']) || !is_string($batchPatch['find']) || !is_string($batchPatch['replace'])
+                            || trim($batchPatch['replace']) === '') {
+                            throw new RuntimeException('AI repair batch '.($batchIndex+1).' returned a malformed patch; no patches were applied.');
+                        }
+                        $dedupeKey = canonical_file_path_key($batchPatch['path'])."\\n".$batchPatch['find'];
+                        if (isset($seenPatchKeys[$dedupeKey])) continue;
+                        $seenPatchKeys[$dedupeKey] = true;
+                        $repairData['patches'][] = $batchPatch;
+                        if (count($repairData['patches']) > 8) {
+                            throw new RuntimeException('AI repair produced more than 8 total patches; no patches were applied.');
+                        }
+                    }
+                    if ($batchIndex + 1 < $batchCount) {
+                        // Two requests per rolling minute at most; allow headroom under a 7,500 TPM provider limit.
+                        for ($waited = 0; $waited < 35; $waited += 5) {
+                            sleep(5);
+                            sse_keepalive();
+                        }
+                    }
+                }
+                if (count($repairData['patches']) < 1) {
+                    throw new RuntimeException('No safe, evidence-backed repair patch was returned across '. $batchCount .' batches; checkpoint was not changed.');
                 }
                 $patchedFiles = [];
                 foreach ($repairData['patches'] as $patch) {
@@ -1590,7 +1653,7 @@ SH;
                         if (trim($patch['find']) === '') {
                             throw new RuntimeException('AI repair cannot create a duplicate or overwrite an existing path: '.$actualPath);
                         }
-                        $currentContent = $allGeneratedFiles[$actualPath];
+                        $currentContent = $patchedFiles[$actualPath] ?? $allGeneratedFiles[$actualPath];
                         $anchor = $patch['find'];
                         $anchorCount = substr_count($currentContent, $anchor);
                         if ($anchorCount !== 1) {
