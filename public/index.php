@@ -254,6 +254,22 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             // Gemini capacity errors should fail over immediately. Groq 429s
             // include a rolling TPM reset time; wait for that window and retry
             // with the automatically reduced token budget on the next attempt.
+            if ($provider['name'] === 'Groq' && $code === 413 && $attempt < 3) {
+                // TPM/request-size 413: keep the diagnostic/instructions and a bounded
+                // tail containing the most relevant source anchors, then retry smaller.
+                $head = substr($requestPrompt, 0, 6500);
+                $tail = substr($requestPrompt, -5500);
+                $requestPrompt = $head."\n\n[COMPACT RETRY: full repository scan was performed locally; only strongest source anchors retained]\n\n".$tail;
+                $groqRetryOutputTokens = 1000;
+                error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=compact_retry status=413 prompt_chars='.strlen($requestPrompt).' output_tokens=1000');
+                sleep(2);
+                continue;
+            }
+            if ($provider['name'] === 'Gemini' && $code === 0) {
+                // Do not wait through repeated three-minute timeouts; fail over immediately.
+                error_log('[NIRA_BUILDER_AI] provider=Gemini model='.$model.' action=failover timeout');
+                break;
+            }
             if ($provider['name'] === 'Groq' && $code === 429 && $attempt < 3) {
                 $retryDelay = ai_retry_delay_seconds($answer, 20);
                 // Groq TPM errors report the rolling-window limit, tokens already
@@ -326,203 +342,149 @@ function canonical_file_path_key(string $path): string {
  * Every saved file is scanned; output is bounded before it reaches the AI prompt.
  */
 function build_project_scan_report(array $files, string $diagnostic): string {
+    // Inspect every saved path/content locally, but send only a bounded index to AI.
     $paths = array_keys($files);
     sort($paths, SORT_NATURAL | SORT_FLAG_CASE);
-    $lines = [];
-    $lines[] = "WHOLE PROJECT FILE SCAN (all ".count($paths)." saved files inspected)";
-    $lines[] = "DIRECTORY INVENTORY:";
+    $lines = ["WHOLE-PROJECT SCAN: inspected all ".count($paths)." saved files."];
     $dirs = [];
+    $types = [];
     foreach ($paths as $path) {
         $parts = explode('/', $path);
         array_pop($parts);
-        $current = '';
+        $dir = '';
         foreach ($parts as $part) {
-            $current = $current === '' ? $part : $current.'/'.$part;
-            $dirs[$current] = ($dirs[$current] ?? 0) + 1;
+            $dir = $dir === '' ? $part : $dir.'/'.$part;
+            $dirs[$dir] = ($dirs[$dir] ?? 0) + 1;
         }
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        $type = str_ends_with(strtolower($path), '.blade.php') ? 'blade'
+            : (str_ends_with(strtolower($path), '.php') ? 'php'
+            : (in_array($ext, ['js','ts','tsx','mjs'], true) ? 'js/ts'
+            : (in_array($ext, ['css','scss'], true) ? 'css' : 'other')));
+        $types[$type][] = $path;
     }
-    ksort($dirs, SORT_NATURAL | SORT_FLAG_CASE);
-    foreach ($dirs as $dir=>$count) $lines[] = $dir.'/ ('.$count.' files)';
-    $lines[] = "COMPLETE FILE PATH INDEX:";
+    $lines[] = "DIRECTORIES:";
+    foreach ($dirs as $dir=>$count) $lines[] = $dir.'/ ('.$count.')';
+    $lines[] = "FILE TYPES:";
+    foreach ($types as $type=>$items) $lines[] = $type.': '.count($items);
+    $lines[] = "COMPLETE SAVED PATH INDEX:";
     foreach ($paths as $path) $lines[] = $path;
 
     $tokens = [];
-    preg_match_all('/[A-Za-z][A-Za-z0-9_]{2,}/', strtolower($diagnostic), $matches);
-    foreach ($matches[0] as $token) {
-        if (!in_array($token, ['the','and','for','with','from','this','that','must','missing','section','laravel','project','file','files','error','failed','required','does','not','exist','settings'], true)) {
-            $tokens[$token] = true;
-        }
+    preg_match_all('/[A-Za-z][A-Za-z0-9_]{2,}/', strtolower($diagnostic), $m);
+    foreach ($m[0] as $token) {
+        if (!in_array($token, ['the','and','for','with','from','this','that','must','missing','section','laravel','project','file','files','error','failed','required','does','not','exist'], true)) $tokens[$token] = true;
     }
-    foreach (['route','controller','model','migration','view','blade','settings','shipping','tax','theme','payment','telegram','google'] as $token) {
+    foreach (['route','controller','model','migration','view','blade','settings','shipping','tax','theme','payment','telegram','google','product','assistant','gateway'] as $token) {
         if (stripos($diagnostic, $token) !== false) $tokens[$token] = true;
     }
-
     $ranked = [];
     foreach ($files as $path=>$content) {
+        $score = 0;
         $lowerPath = strtolower($path);
         $lowerContent = strtolower($content);
-        $score = 0;
-        $matched = [];
         foreach (array_keys($tokens) as $token) {
-            if (str_contains($lowerPath, $token)) { $score += 5; $matched[] = 'path:'.$token; }
-            $count = substr_count($lowerContent, $token);
-            if ($count > 0) { $score += min(8, $count); $matched[] = 'content:'.$token.'('.$count.')'; }
+            if (str_contains($lowerPath, $token)) $score += 12;
+            if (str_contains($lowerContent, $token)) $score += min(5, substr_count($lowerContent, $token));
         }
-        if ($score > 0) $ranked[$path] = ['score'=>$score,'matches'=>$matched];
+        if ($score > 0) $ranked[$path] = $score;
     }
-    uasort($ranked, static fn($a,$b) => $b['score'] <=> $a['score']);
+    arsort($ranked);
+    $lines[] = "DIAGNOSTIC-RELATED FILES (ranked after scanning all files):";
+    foreach (array_slice($ranked, 0, 24, true) as $path=>$score) $lines[] = $path.' [score '.$score.']';
 
-    $lines[] = "DIAGNOSTIC-RELATED FILES (ranked after scanning every file):";
-    $shown = 0;
-    foreach ($ranked as $path=>$info) {
-        $lines[] = $path." [score ".$info['score'].": ".implode(', ', array_slice($info['matches'],0,12))."]";
-        if (++$shown >= 35) break;
-    }
-
-    // Search for references to every discovered filename stem and Laravel view key.
-    $referenceRows = [];
-    foreach ($files as $sourcePath=>$sourceContent) {
-        foreach ($paths as $targetPath) {
-            if ($sourcePath === $targetPath) continue;
-            $base = pathinfo($targetPath, PATHINFO_FILENAME);
-            $base = preg_replace('/\.blade$/i', '', $base);
-            if (strlen($base) < 4) continue;
-            $needles = [$base];
-            if (str_ends_with($targetPath, '.blade.php')) {
-                $viewKey = preg_replace('#^resources/views/|\.blade\.php$#', '', $targetPath);
-                $needles[] = str_replace('/', '.', $viewKey);
+    // Searchable Laravel indexes are built locally across every file; only
+    // diagnostic-relevant matches are serialized to keep AI context bounded.
+    $lines[] = "MATCHING BASENAME / PHP SYMBOL / NAMESPACE / ROUTE / VIEW / TABLE / CONFIG INDEX:";
+    $indexRows = [];
+    foreach ($files as $path=>$source) {
+        $base = strtolower(basename($path));
+        foreach (array_keys($tokens) as $token) if (str_contains($base, $token)) {
+            $indexRows[] = "basename ".$base." => ".$path;
+            break;
+        }
+        if (preg_match('/^namespace\\s+([^;{]+)[;{]/m', $source, $ns)) {
+            $value = trim($ns[1]);
+            foreach (array_keys($tokens) as $token) if (str_contains(strtolower($value), $token)) {
+                $indexRows[] = "namespace ".$value." => ".$path;
+                break;
             }
-            foreach (array_unique($needles) as $needle) {
-                if (stripos($sourceContent, $needle) !== false) {
-                    $referenceRows[$targetPath][$sourcePath] = true;
+        }
+        $patterns = [
+            'symbol'=>'/\\b(?:class|interface|trait|enum|function)\\s+([A-Za-z_][A-Za-z0-9_]*)/i',
+            'route'=>'/->name\\s*\\(\\s*[\\\'\\"]([^\\\'\\"]+)/',
+            'view'=>'/(?:view|@extends|@include|@each|@component)\\s*\\(?\\s*[\\\'\\"]([^\\\'\\"]+)/i',
+            'table'=>'/Schema::(?:create|table)\\s*\\(\\s*[\\\'\\"]([^\\\'\\"]+)/',
+            'config'=>'/[\\\'\\"]([A-Z][A-Z0-9_]{2,})[\\\'\\"]\\s*=>/',
+        ];
+        foreach ($patterns as $kind=>$pattern) {
+            if (!preg_match_all($pattern, $source, $found)) continue;
+            foreach (array_unique($found[1]) as $value) {
+                foreach (array_keys($tokens) as $token) if (str_contains(strtolower($value), $token)) {
+                    $indexRows[] = $kind." ".$value." => ".$path;
                     break;
                 }
             }
         }
     }
-    $lines[] = "CROSS-FILE REFERENCES (where other files mention a target file/view stem):";
-    $refCount = 0;
-    foreach ($referenceRows as $target=>$sources) {
-        $lines[] = $target." <- ".implode(', ', array_keys($sources));
-        if (++$refCount >= 45) break;
-    }
+    foreach (array_slice(array_unique($indexRows), 0, 48) as $row) $lines[] = $row;
 
-    // Explicit Laravel wiring checks for route -> controller and view() -> Blade paths.
-    $lines[] = "LARAVEL WIRING CHECKS:";
-    foreach ($files as $sourcePath=>$sourceContent) {
-        if ($sourcePath === 'routes/web.php' || str_contains($sourcePath, 'Controller.php')) {
-            if (preg_match_all('/([A-Za-z_][A-Za-z0-9_]*Controller)::class/', $sourceContent, $classes)) {
-                foreach (array_unique($classes[1]) as $class) {
-                    $expected = 'app/Http/Controllers/'.str_replace('\\\\', '/', $class).'.php';
-                    $found = [];
-                    foreach ($paths as $candidate) if (str_ends_with($candidate, '/'.$class.'.php') || $candidate === $expected) $found[] = $candidate;
-                    $lines[] = $sourcePath.": controller ".$class." => ".($found ? implode(', ', $found) : 'NO MATCHING FILE FOUND');
-                }
-            }
-        }
-        if (str_ends_with($sourcePath, '.php') && preg_match_all('/view\\([\\\'\\"]([^\\\'\\"]+)[\\\'\\"]/', $sourceContent, $views)) {
+    // Compact reference checks; do not serialize huge symbol/config indexes into the AI prompt.
+    $lines[] = "MATCHING VIEW/ROUTE REFERENCES:";
+    $refs = [];
+    foreach ($files as $sourcePath=>$source) {
+        if ($sourcePath !== 'routes/web.php' && !str_contains($sourcePath, 'Controller.php')) continue;
+        if (preg_match_all('/view\\s*\\(\\s*[\\\'\\"]([^\\\'\\"]+)/', $source, $views)) {
             foreach (array_unique($views[1]) as $viewKey) {
                 $expected = 'resources/views/'.str_replace('.', '/', $viewKey).'.blade.php';
-                $lines[] = $sourcePath.": view(".$viewKey.") => ".(isset($files[$expected]) ? $expected : 'NO EXACT VIEW PATH; inspect case/path variants');
+                $refs[] = $sourcePath.' => view('.$viewKey.') => '.(isset($files[$expected]) ? $expected : 'no exact path; check case/basename index');
+            }
+        }
+        if (preg_match_all('/([A-Za-z_][A-Za-z0-9_]*Controller)::class/', $source, $classes)) {
+            foreach (array_unique($classes[1]) as $class) {
+                $matches = array_values(array_filter($paths, static fn($p)=>str_ends_with($p, '/'.$class.'.php')));
+                $refs[] = $sourcePath.' => '.$class.' => '.($matches ? implode(', ', $matches) : 'no exact class path; inspect namespace index');
             }
         }
     }
-    // Universal searchable index: exact path, basename, extension/type, Laravel role,
-    // PHP symbols, Blade components/sections, named routes, migrations and config keys.
-    $lines[] = "UNIVERSAL FILE-TYPE INDEX:";
-    $typeGroups = [];
-    $basenameIndex = [];
-    $symbolIndex = [];
-    $namespaceIndex = [];
-    $routeIndex = [];
-    $viewReferenceIndex = [];
-    $tableIndex = [];
-    $configIndex = [];
-    $fileMetadata = [];
-    foreach ($files as $path=>$source) {
-        $base = basename($path);
-        $lower = strtolower($path);
-        $ext = strtolower(pathinfo($base, PATHINFO_EXTENSION));
-        if (str_ends_with($lower, '.blade.php')) $type = 'blade-view';
-        elseif (str_ends_with($lower, '.php')) $type = 'php-source';
-        elseif (in_array($ext, ['js','mjs','ts','tsx'], true)) $type = 'javascript-typescript';
-        elseif (in_array($ext, ['css','scss','sass'], true)) $type = 'stylesheet';
-        elseif (in_array($ext, ['json','ya?ml','yml','xml'], true)) $type = 'configuration-data';
-        elseif (in_array($ext, ['md','txt'], true)) $type = 'documentation';
-        elseif (in_array($ext, ['sh'], true) || in_array($base, ['Dockerfile','artisan'], true)) $type = 'runtime-script';
-        else $type = 'other-text';
-        $typeGroups[$type][] = $path;
-        $basenameIndex[strtolower($base)][] = $path;
-        $meta = ['type'=>$type,'bytes'=>strlen($source)];
-        if (preg_match('/^namespace\\s+([^;{]+)[;{]/m', $source, $m)) {
-            $meta['namespace'] = trim($m[1]);
-            $namespaceIndex[trim($m[1])][] = $path;
-        }
-        if (preg_match_all('/\\b(?:class|interface|trait|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)/i', $source, $m)) {
-            foreach (array_unique($m[1]) as $symbol) $symbolIndex[$symbol][] = $path;
-        }
-        if (preg_match_all('/\\bfunction\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\(/i', $source, $m)) {
-            foreach (array_unique($m[1]) as $symbol) $symbolIndex[$symbol][] = $path;
-        }
-        if (preg_match_all('/Route::(?:get|post|put|patch|delete|match|any|resource|apiResource)\\s*\\([^;]{0,500}?->name\\s*\\(\\s*[\\\'\\"]([^\\\'\\"]+)/is', $source, $m)) {
-            foreach (array_unique($m[1]) as $routeName) $routeIndex[$routeName][] = $path;
-        }
-        if (preg_match_all('/(?:view|@extends|@include|@each|@component)\\s*\\(?\\s*[\\\'\\"]([^\\\'\\"]+)/i', $source, $m)) {
-            foreach (array_unique($m[1]) as $viewKey) $viewReferenceIndex[$viewKey][] = $path;
-        }
-        if (preg_match_all('/Schema::(?:create|table)\\s*\\(\\s*[\\\'\\"]([^\\\'\\"]+)/', $source, $m)) {
-            foreach (array_unique($m[1]) as $tableName) $tableIndex[$tableName][] = $path;
-        }
-        if (preg_match_all('/[\\\'\\"]([A-Z][A-Z0-9_]{2,})[\\\'\\"]\\s*=>/', $source, $m)) {
-            foreach (array_unique($m[1]) as $configKey) $configIndex[$configKey][] = $path;
-        }
-        $fileMetadata[$path] = $meta;
-    }
-    foreach ($typeGroups as $type=>$groupPaths) {
-        $lines[] = "TYPE ".$type." (".count($groupPaths)."): ".implode(', ', $groupPaths);
-    }
-    $lines[] = "BASENAME / EXACT-FILENAME LOOKUP:";
-    foreach ($basenameIndex as $base=>$matches) $lines[] = $base." => ".implode(', ', $matches);
-    $lines[] = "PHP CLASS / INTERFACE / TRAIT / ENUM / FUNCTION SYMBOL INDEX:";
-    foreach ($symbolIndex as $symbol=>$matches) $lines[] = $symbol." => ".implode(', ', array_unique($matches));
-    $lines[] = "NAMESPACE INDEX:";
-    foreach ($namespaceIndex as $namespace=>$matches) $lines[] = $namespace." => ".implode(', ', $matches);
-    $lines[] = "NAMED ROUTE INDEX:";
-    foreach ($routeIndex as $routeName=>$matches) $lines[] = $routeName." => ".implode(', ', $matches);
-    $lines[] = "BLADE / VIEW REFERENCE INDEX:";
-    foreach ($viewReferenceIndex as $viewKey=>$matches) $lines[] = $viewKey." => ".implode(', ', $matches);
-    $lines[] = "DATABASE TABLE / MIGRATION INDEX:";
-    foreach ($tableIndex as $tableName=>$matches) $lines[] = $tableName." => ".implode(', ', $matches);
-    $lines[] = "CONFIGURATION KEY INDEX:";
-    foreach ($configIndex as $configKey=>$matches) $lines[] = $configKey." => ".implode(', ', $matches);
+    foreach (array_slice(array_unique($refs), 0, 24) as $line) $lines[] = $line;
+    $lines[] = "SEARCH RULE: all saved files were inspected. Search the complete path index, case-insensitive basename, extension/type and ranked content matches before declaring missing. Reuse existing files; never create duplicate equivalents.";
+    $report = implode("\n", $lines);
+    return strlen($report) > 11500 ? substr($report, 0, 11500)."\n[scan report compacted; all files were still inspected]" : $report;
+}
 
-    // Add common Laravel role-based aliases, so a request by responsibility can
-    // locate files even when the diagnostic does not quote the literal filename.
-    $rolePatterns = [
-        'controller'=>['/Controller\\.php$/i'],
-        'model'=>['#^app/Models/.*\\.php$#i'],
-        'migration'=>['#^database/migrations/.*\\.php$#i'],
-        'middleware'=>['#^app/Http/Middleware/.*\\.php$#i'],
-        'policy'=>['#^app/Policies/.*\\.php$#i'],
-        'request-validation'=>['#^app/Http/Requests/.*\\.php$#i'],
-        'service'=>['#^app/Services/.*\\.php$#i'],
-        'blade-view'=>['#^resources/views/.*\\.blade\\.php$#i'],
-        'route'=>['#^routes/.*\\.php$#i'],
-        'test'=>['#^tests/.*Test\\.php$#i'],
-        'asset'=>['#^(resources|public)/(css|js|images)/#i'],
-        'configuration'=>['#^(config/|composer\\.json$|phpunit\\.xml$|vite\\.config\\.)#i'],
-    ];
-    $lines[] = "ROLE-BASED FILE LOOKUP:";
-    foreach ($rolePatterns as $role=>$patterns) {
-        $matches = [];
-        foreach ($paths as $candidate) foreach ($patterns as $pattern) {
-            if (preg_match($pattern, $candidate)) { $matches[] = $candidate; break; }
+function build_repair_source_context(array $files, string $diagnostic, int $maxBytes = 7000): string {
+    // Rank every file by path and content relevance, then include only the strongest
+    // complete source anchors. This keeps provider requests within small TPM limits.
+    $tokens = [];
+    preg_match_all('/[A-Za-z][A-Za-z0-9_]{2,}/', strtolower($diagnostic), $m);
+    foreach ($m[0] as $token) if (strlen($token) >= 4) $tokens[$token] = true;
+    $ranked = [];
+    foreach ($files as $path=>$content) {
+        $score = 0;
+        $p = strtolower($path);
+        $c = strtolower($content);
+        foreach (array_keys($tokens) as $token) {
+            if (str_contains($p, $token)) $score += 15;
+            if (str_contains($c, $token)) $score += min(4, substr_count($c, $token));
         }
-        $lines[] = $role." => ".($matches ? implode(', ', $matches) : 'none');
+        if ($score > 0) $ranked[$path] = $score;
     }
-
-    $lines[] = "SEARCH RULE: Treat every index above as searchable. Search exact path, case-insensitive path, basename, extension/type, namespace, class/function symbol, route name, Blade view key, migration table, config key, and role aliases. Before reporting a file missing, exhaust all indexes and inspect likely candidates' complete contents. Never create a duplicate when an equivalent basename, symbol, view key, or role implementation already exists.";
-    return implode("\n", $lines);
+    arsort($ranked);
+    $out = '';
+    foreach (array_slice($ranked, 0, 8, true) as $path=>$score) {
+        $source = (string)$files[$path];
+        $remaining = $maxBytes - strlen($out);
+        if ($remaining < 700) break;
+        $limit = min(1800, $remaining - strlen($path) - 40);
+        if (strlen($source) > $limit) {
+            $head = (int)floor($limit * 0.65);
+            $tail = max(0, $limit - $head);
+            $source = substr($source, 0, $head)."\n/* middle omitted by bounded context; inspect full saved file before patching */\n".($tail ? substr($source, -$tail) : '');
+        }
+        $out .= "\n\n===== EXISTING SOURCE: ".$path." (relevance ".$score.") =====\n".$source;
+    }
+    return $out;
 }
 
 function validate_laravel_project(array $rawFiles): array {
@@ -1540,93 +1502,45 @@ SH;
             // General self-repair: let the validator describe the actual defect,
             // then let the model repair every related file in one bounded pass.
             // Runtime/security-owned files are never editable by this repair loop.
-            $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
-            $fileList = implode("\n", array_keys($allGeneratedFiles));
+            // Search the entire project locally, but send only bounded relevant source.
             $context = "";
+            $repairTargetContext = build_repair_source_context($allGeneratedFiles, $validationMessage, 5000);
             $isSettingsSectionDiagnostic = preg_match('/settings section:\\s*(telegram|google|payment|theme|shipping|tax)/i', $validationMessage) === 1;
-            $contextBudget = $isSettingsSectionDiagnostic ? 0 : 2500; // Settings repairs receive focused source excerpts below.
-            // Put the exact files implicated by the validator first; otherwise the
-            // context budget may omit the settings view/controller entirely.
-            $priorityContextPaths = [];
             if ($isSettingsSectionDiagnostic) {
-                $priorityContextPaths = [
+                $prioritySettings = [
                     'resources/views/admin/settings/index.blade.php',
                     'app/Http/Controllers/Admin/SettingsController.php',
                     'routes/web.php',
                     'app/Models/Setting.php',
                     'database/migrations/2025_01_01_000012_create_settings_table.php',
                 ];
-            }
-            $contextOrder = [];
-            foreach ($priorityContextPaths as $priorityPath) {
-                if (isset($allGeneratedFiles[$priorityPath])) $contextOrder[$priorityPath] = $allGeneratedFiles[$priorityPath];
-            }
-            foreach ($allGeneratedFiles as $contextPath=>$contextContent) {
-                if (!isset($contextOrder[$contextPath])) $contextOrder[$contextPath] = $contextContent;
-            }
-            foreach ($contextOrder as $contextPath=>$contextContent) {
-                if (in_array($contextPath, $protectedPaths, true)) continue;
-                $contextExcerpt = strlen($contextContent) > 900
-                    ? substr($contextContent, 0, 450)."\n... middle omitted ...\n".substr($contextContent, -450)
-                    : $contextContent;
-                $entry = "\n\n===== ".$contextPath." =====\n".$contextExcerpt;
-                if (strlen($context) + strlen($entry) > $contextBudget) break;
-                $context .= $entry;
-            }
-            // Supply exact source anchors for every configurable settings section.
-            $repairTargetContext = "";
-            if ($isSettingsSectionDiagnostic) {
-                $viewPath = 'resources/views/admin/settings/index.blade.php';
-                $controllerPath = 'app/Http/Controllers/Admin/SettingsController.php';
-                $routesPath = 'routes/web.php';
-                if (isset($allGeneratedFiles[$viewPath])) {
-                    $repairTargetContext .= "\n\n===== COMPLETE ".$viewPath." =====\n".$allGeneratedFiles[$viewPath];
-                }
-                if (isset($allGeneratedFiles[$controllerPath])) {
-                    // The complete controller is required to repair malformed method
-                    // nesting/braces; excerpts can hide the actual class boundary.
-                    $repairTargetContext .= "\n\n===== COMPLETE ".$controllerPath." =====\n".$allGeneratedFiles[$controllerPath];
-                }
-                if (isset($allGeneratedFiles[$routesPath])) {
-                    $repairTargetContext .= "\n\n===== COMPLETE ".$routesPath." =====\n".$allGeneratedFiles[$routesPath];
-                }
-                foreach ($allGeneratedFiles as $settingsPath=>$settingsSource) {
-                    if (str_starts_with($settingsPath, 'resources/views/admin/settings/')) {
-                        $repairTargetContext .= "\n\n===== COMPLETE ".$settingsPath." =====\n".$settingsSource;
-                    }
-                }
-                foreach (['database/migrations/2025_01_01_000012_create_settings_table.php','app/Models/Setting.php','resources/views/admin/layout.blade.php','resources/views/layouts/admin.blade.php'] as $extraPath) {
-                    if (isset($allGeneratedFiles[$extraPath])) {
-                        $repairTargetContext .= "\n\n===== ".$extraPath." =====\n".$allGeneratedFiles[$extraPath];
-                    }
+                foreach ($prioritySettings as $priorityPath) {
+                    if (!isset($allGeneratedFiles[$priorityPath]) || str_contains($repairTargetContext, '===== EXISTING SOURCE: '.$priorityPath.' ')) continue;
+                    $remaining = max(0, 9000 - strlen($repairTargetContext));
+                    if ($remaining < 500) break;
+                    $source = (string)$allGeneratedFiles[$priorityPath];
+                    $source = strlen($source) > $remaining - 100 ? substr($source, 0, max(0, $remaining - 100)) : $source;
+                    $repairTargetContext .= "\n\n===== PRIORITY EXISTING SOURCE: ".$priorityPath." =====\n".$source;
                 }
             }
+            if (strlen($repairTargetContext) > 9000) $repairTargetContext = substr($repairTargetContext, 0, 9000);
             $repairHistory[] = ['attempt'=>$repairAttempt+1,'error'=>substr($validationMessage,0,500)];
             progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
                 'stage'=>'auto_repair','percent'=>80,'files_created'=>count($allGeneratedFiles),
                 'repair_attempt'=>$repairAttempt+1,'repair_completed_attempts'=>$completedRepairAttempts,
                 'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/'.$maxRepairAttempts.')']);
 
-            $repairPrompt = $system.
-                "\n\nAUTONOMOUS PROJECT REPAIR TASK.".
-                "\nThe complete Laravel project already exists. The validator failed with this exact diagnostic: ".$validationMessage.
-                "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
-                "\nRelevant project file paths:\n".implode("\n", array_slice(array_keys($allGeneratedFiles), 0, 35)).
-                "\n\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
-                "\n\nYou MUST use the whole-project scan report before proposing patches. Search the full path index and reference map for existing files first. If a likely file exists anywhere, patch/reuse its real path; do not create a second copy. If references disagree, repair the existing wiring (routes/controller/view/nav) consistently. Only create a file when the scan proves no matching path or equivalent view exists.".
-                "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty string for a new file\",\"replace\":\"replacement snippet or complete new file content\"}]}.".
-                "\nReturn 1 to 8 minimal patches only. For an existing path, find must be non-empty and match exactly once. For a new path, find must be the empty string and replace must contain the complete new file. Never replace an existing file wholesale.".
-                "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
-                "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
-                "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
-                "\nFor content validation errors, fix the actual implementation rather than inserting placeholder text or bypassing validation.".
-                "\nFor ANY Owner Admin Panel settings-section diagnostic (telegram, google, payment, theme, shipping or tax), repair the complete settings navigation, controller methods, routes, and Blade views as needed. Inspect every supplied settings file before deciding what is missing. Reuse an existing view when suitable; create a missing view with a new-file patch when necessary. Every section must be a real owner-admin-only, CSRF-protected form with validation, persistence through the existing Setting model/schema, and saved values loaded back into the form. Fix malformed method/class braces rather than adding nested methods. Shipping must persist base_rate and per_km_rate; tax must persist tax_rate. Ensure route names, controller return view names, navigation links, and actual view paths agree. Preserve existing Telegram, Google OAuth, payment, theme and general settings, including encryption and blank-secret preservation. Do not remove unrelated settings or replace existing files wholesale.".
-                "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
-                "\nUSER REQUEST:\n".$prompt.
-                "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context.$repairTargetContext;
+            $repairPrompt =
+                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
+                "The full saved project was scanned locally. Use the supplied complete path index and ranked matches to locate existing files before deciding anything is missing. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
+                "Repair only the diagnosed root cause and directly related wiring. Return 1 to 8 minimal patches. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
+                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials.".
+                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 1200).
+                "\n\nPROJECT SCAN AND COMPLETE PATH INDEX:\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
+                "\n\nRELEVANT EXISTING SOURCE FILES (bounded excerpts; confirm exact anchors):".$repairTargetContext;
 
             try {
-                $repairResult = ai_request_json($repairPrompt, 3000);
+                $repairResult = ai_request_json($repairPrompt, 1800);
                 $repairData = json_decode($repairResult['text'], true);
                 if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
                     || count($repairData['patches']) < 1 || count($repairData['patches']) > 8) {
