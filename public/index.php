@@ -1339,7 +1339,10 @@ SH;
             }
             foreach ($contextOrder as $contextPath=>$contextContent) {
                 if (in_array($contextPath, $protectedPaths, true)) continue;
-                $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 600);
+                $contextExcerpt = strlen($contextContent) > 900
+                    ? substr($contextContent, 0, 450)."\n... middle omitted ...\n".substr($contextContent, -450)
+                    : $contextContent;
+                $entry = "\n\n===== ".$contextPath." =====\n".$contextExcerpt;
                 if (strlen($context) + strlen($entry) > $contextBudget) break;
                 $context .= $entry;
             }
@@ -1353,8 +1356,8 @@ SH;
                 "\n\nAUTONOMOUS PROJECT REPAIR TASK.".
                 "\nThe complete Laravel project already exists. The validator failed with this exact diagnostic: ".$validationMessage.
                 "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
-                "\nRelevant project file paths:\n".implode("\\n", array_slice(array_keys($allGeneratedFiles), 0, 60)).
-                "\nReturn JSON only: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file content\"}]}.".
+                "\nRelevant project file paths:\n".implode("\n", array_slice(array_keys($allGeneratedFiles), 0, 35)).
+                "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet\",\"replace\":\"replacement snippet\"}]}.".
                 "\nReturn 1 to 3 minimal patches only. Each find value must match exactly once in the current file; each replace value must preserve surrounding functionality and make the smallest necessary change. Never return a whole file.".
                 "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
                 "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
