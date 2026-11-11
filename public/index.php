@@ -393,6 +393,42 @@ function build_project_scan_report(array $files, string $diagnostic): string {
     $lines[] = "DIAGNOSTIC-RELATED FILES (ranked after scanning all files):";
     foreach (array_slice($ranked, 0, 24, true) as $path=>$score) $lines[] = $path.' [score '.$score.']';
 
+    // Searchable Laravel indexes are built locally across every file; only
+    // diagnostic-relevant matches are serialized to keep AI context bounded.
+    $lines[] = "MATCHING BASENAME / PHP SYMBOL / NAMESPACE / ROUTE / VIEW / TABLE / CONFIG INDEX:";
+    $indexRows = [];
+    foreach ($files as $path=>$source) {
+        $base = strtolower(basename($path));
+        foreach (array_keys($tokens) as $token) if (str_contains($base, $token)) {
+            $indexRows[] = "basename ".$base." => ".$path;
+            break;
+        }
+        if (preg_match('/^namespace\\s+([^;{]+)[;{]/m', $source, $ns)) {
+            $value = trim($ns[1]);
+            foreach (array_keys($tokens) as $token) if (str_contains(strtolower($value), $token)) {
+                $indexRows[] = "namespace ".$value." => ".$path;
+                break;
+            }
+        }
+        $patterns = [
+            'symbol'=>'/\\b(?:class|interface|trait|enum|function)\\s+([A-Za-z_][A-Za-z0-9_]*)/i',
+            'route'=>'/->name\\s*\\(\\s*[\\\'\\"]([^\\\'\\"]+)/',
+            'view'=>'/(?:view|@extends|@include|@each|@component)\\s*\\(?\\s*[\\\'\\"]([^\\\'\\"]+)/i',
+            'table'=>'/Schema::(?:create|table)\\s*\\(\\s*[\\\'\\"]([^\\\'\\"]+)/',
+            'config'=>'/[\\\'\\"]([A-Z][A-Z0-9_]{2,})[\\\'\\"]\\s*=>/',
+        ];
+        foreach ($patterns as $kind=>$pattern) {
+            if (!preg_match_all($pattern, $source, $found)) continue;
+            foreach (array_unique($found[1]) as $value) {
+                foreach (array_keys($tokens) as $token) if (str_contains(strtolower($value), $token)) {
+                    $indexRows[] = $kind." ".$value." => ".$path;
+                    break;
+                }
+            }
+        }
+    }
+    foreach (array_slice(array_unique($indexRows), 0, 48) as $row) $lines[] = $row;
+
     // Compact reference checks; do not serialize huge symbol/config indexes into the AI prompt.
     $lines[] = "MATCHING VIEW/ROUTE REFERENCES:";
     $refs = [];
@@ -414,7 +450,7 @@ function build_project_scan_report(array $files, string $diagnostic): string {
     foreach (array_slice(array_unique($refs), 0, 24) as $line) $lines[] = $line;
     $lines[] = "SEARCH RULE: all saved files were inspected. Search the complete path index, case-insensitive basename, extension/type and ranked content matches before declaring missing. Reuse existing files; never create duplicate equivalents.";
     $report = implode("\n", $lines);
-    return strlen($report) > 9500 ? substr($report, 0, 9500)."\n[scan report compacted; all files were still inspected]" : $report;
+    return strlen($report) > 11500 ? substr($report, 0, 11500)."\n[scan report compacted; all files were still inspected]" : $report;
 }
 
 function build_repair_source_context(array $files, string $diagnostic, int $maxBytes = 7000): string {
