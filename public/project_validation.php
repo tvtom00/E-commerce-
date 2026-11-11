@@ -15,6 +15,9 @@ function nira_validate_project_source_contracts(array $files): void {
         for($i=0;$i<$count;$i++) {
             $token=$tokens[$i]; if(!is_array($token)) continue;
             if(in_array($token[0],[T_CLASS,T_INTERFACE,T_TRAIT,T_ENUM],true)) {
+                $previous=$i-1;
+                while($previous>=0 && is_array($tokens[$previous]) && in_array($tokens[$previous][0],[T_WHITESPACE,T_COMMENT,T_DOC_COMMENT],true)) $previous--;
+                if($previous>=0 && is_array($tokens[$previous]) && in_array($tokens[$previous][0],[T_DOUBLE_COLON,T_NEW],true)) continue;
                 for($j=$i+1;$j<$count;$j++) {
                     if(is_array($tokens[$j])&&$tokens[$j][0]===T_STRING) {
                         $fqcn=($namespace!==''?$namespace.'\\':'').$tokens[$j][1];
