@@ -25,6 +25,14 @@ function expect_project_failure(array $files, string $expected): void {
 $valid=fixture_project();
 nira_validate_project_source_contracts($valid);
 
+$schemaFixture=$valid;
+$schemaFixture['database/migrations/2025_01_01_000000_create_users_table.php']="<?php\nuse Illuminate\\Support\\Facades\\Schema;\nSchema::create('users', function (\$table) { \$table->id(); \$table->string('name'); \$table->string('email'); \$table->timestamps(); });";
+$schemaFixture['app/Models/User.php']="<?php\nnamespace App\\Models;\nclass User { protected \$fillable = ['name', 'email']; }";
+nira_validate_project_source_contracts($schemaFixture);
+$schemaBroken=$schemaFixture;
+$schemaBroken['app/Models/User.php']="<?php\nnamespace App\\Models;\nclass User { protected \$fillable = ['name', 'email', 'is_active']; }";
+expect_project_failure($schemaBroken,'missing database column users.is_active');
+
 $broken=$valid;
 $broken['app/Policies/OrderPolicy.php']="<?php\nnamespace App\\Policies;\nclass OrderPolicy { public function broken( { }";
 expect_project_failure($broken,'PHP syntax error');
