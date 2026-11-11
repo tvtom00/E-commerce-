@@ -1626,6 +1626,7 @@ SH;
                     }
                     $repairData = $retryData;
                 }
+                $uniquePatches = [];
                 foreach ($repairData['patches'] as $batchPatch) {
                     if (!is_array($batchPatch) || !isset($batchPatch['path'],$batchPatch['find'],$batchPatch['replace'])
                         || !is_string($batchPatch['path']) || !is_string($batchPatch['find']) || !is_string($batchPatch['replace'])
@@ -1635,7 +1636,9 @@ SH;
                     $dedupeKey = canonical_file_path_key($batchPatch['path'])."\\n".$batchPatch['find'];
                     if (isset($seenPatchKeys[$dedupeKey])) continue;
                     $seenPatchKeys[$dedupeKey] = true;
+                    $uniquePatches[] = $batchPatch;
                 }
+                $repairData['patches'] = $uniquePatches;
                 if (count($repairData['patches']) < 1) {
                     throw new RuntimeException('No safe, evidence-backed repair patch was returned after the coherent repair pass and focused retry; checkpoint was not changed.');
                 }
@@ -1682,25 +1685,10 @@ SH;
                             if (!is_array($rebased) || !isset($rebased['find'],$rebased['replace'])
                                 || !is_string($rebased['find']) || !is_string($rebased['replace'])
                                 || trim($rebased['find']) === '' || trim($rebased['replace']) === '') {
-                                // Last-resort safe mode: replace the CONTENT of this already-existing
-                                // canonical path, never create another path and never guess an anchor.
-                                // The model receives the authoritative full file and must return it whole.
-                                $fullFilePrompt = "Return JSON only with one string field named content containing the COMPLETE revised file. ".
-                                    "The previous snippet patch could not be safely matched. Rewrite this existing file in full, applying only the requested repair while preserving every unrelated method, permission, validation rule, integration and feature. ".
-                                    "Do not return a diff, excerpt, explanation, markdown fence, or a new path. ".
-                                    "If you cannot preserve the complete file safely, return an empty content string.".
-                                    "\\nEXISTING PATH (must remain exactly this path): ".$actualPath.
-                                    "\\nVALIDATION DIAGNOSTIC: ".$validationMessage.
-                                    "\\nREQUESTED REPAIR: ".$patch['replace'].
-                                    "\\nAUTHORITATIVE COMPLETE CURRENT FILE:\\n".$currentContent;
-                                $fullResult = ai_request_json($fullFilePrompt, 9000);
-                                $fullData = json_decode($fullResult['text'], true);
-                                if (!is_array($fullData) || !isset($fullData['content']) || !is_string($fullData['content'])
-                                    || trim($fullData['content']) === '' || strlen($fullData['content']) > MAX_FILE_BYTES) {
-                                    throw new RuntimeException('AI could not safely rebuild the complete existing file '.$actualPath.'; no files were changed.');
-                                }
-                                $patchedFiles[$actualPath] = $fullData['content'];
-                                continue;
+                                // Do not allow an AI-generated whole-file replacement when a
+                                // unique exact anchor cannot be established. This avoids silently
+                                // deleting unrelated features, routes, policies or integrations.
+                                throw new RuntimeException('AI repair could not safely identify a unique code anchor in '.$actualPath.'; checkpoint remains unchanged.');
                             }
                             $anchor = $rebased['find'];
                             $patch['replace'] = $rebased['replace'];
@@ -1805,6 +1793,7 @@ SH;
                 $result['files'] = $runtimeFiles;
                 error_log('[NIRA_BUILDER_REPAIR] attempt='.($repairAttempt+1).' files='.implode(',',array_keys($changedFiles)));
             } catch (Throwable $repairError) {
+                error_log('[NIRA_BUILDER_REPAIR] failed attempt='.($repairAttempt+1).' validation='.substr(preg_replace('/\\s+/',' ',$validationMessage),0,700).' error='.substr(preg_replace('/\\s+/',' ',$repairError->getMessage()),0,1000));
                 respond(502, ['error'=>'Automatic Laravel project repair failed.','detail'=>$repairError->getMessage(),'validation'=>$validationMessage]);
             }
         }
