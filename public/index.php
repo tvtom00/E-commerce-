@@ -720,7 +720,9 @@ function validate_laravel_project(array $rawFiles): array {
         'app/Services/Payments/PaymentGateway.php' => ['createPayment','verifyWebhook'],
         'app/Services/Payments/ConfiguredGateway.php' => ['endpoint','secret','sandbox','verifyWebhook'],
         'app/Services/TelegramNotifier.php' => ['api.telegram.org','sendMessage','chat_id'],
-        'app/Services/ProductAssistant.php' => ['generateContent','json_decode','attributes'],
+        // Laravel's HTTP response already provides JSON decoding via response->json();
+        // accept that native API instead of requiring a redundant json_decode() call.
+        'app/Services/ProductAssistant.php' => ['generateContent','attributes'],
         'app/Http/Controllers/PaymentWebhookController.php' => ['verifyWebhook','amount','idempot'],
         'app/Http/Middleware/EnsureRole.php' => ['role','abort'],
         'app/Policies/OrderPolicy.php' => ['sub-admin','order'],
