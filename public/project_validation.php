@@ -153,7 +153,7 @@ function nira_validate_model_schema_columns(array $files): void {
                     } elseif(in_array($method,$columnMethods,true)&&$columnName!=='') $tables[$tableName][$columnName]=true;
                 }
             }
-            if(preg_match_all('/\$table\s*->\s*foreignIdFor\s*\(\s*([A-Za-z_\\\\][A-Za-z0-9_\\\\]*)::class\s*(?:,\s*[\'"]([^\'"]+)[\'"])?/',$body,$foreignFor,PREG_SET_ORDER)) {
+            if(preg_match_all('/\$table\s*->\s*foreignIdFor\s*\(\s*(?:\\\\)?([A-Za-z_][A-Za-z0-9_\\\\]*)::class\s*(?:,\s*[\'"]([^\'"]+)[\'"])?/',$body,$foreignFor,PREG_SET_ORDER)) {
                 foreach($foreignFor as $foreign) {
                     $default=preg_replace('/(?<!^)[A-Z]/','_$0',substr($foreign[1],strrpos($foreign[1],'\\')!==false?strrpos($foreign[1],'\\')+1:0));
                     $tables[$tableName][($foreign[2]??'')!==''?$foreign[2]:strtolower($default).'_id']=true;
