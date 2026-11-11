@@ -1557,10 +1557,37 @@ SH;
                             throw new RuntimeException('AI repair cannot create a duplicate or overwrite an existing path: '.$actualPath);
                         }
                         $currentContent = $allGeneratedFiles[$actualPath];
-                        if (substr_count($currentContent, $patch['find']) !== 1) {
-                            throw new RuntimeException('AI repair patch anchor did not match exactly once in '.$actualPath.'; no files were changed.');
+                        $anchor = $patch['find'];
+                        $anchorCount = substr_count($currentContent, $anchor);
+                        if ($anchorCount !== 1) {
+                            // One bounded rebase attempt: ask the model to quote an exact,
+                            // unique snippet from the current file rather than guessing offsets.
+                            $rebasePrompt = "Return JSON only with two string fields named find and replace. ".
+                                "The find value must be an exact unique substring copied verbatim from CURRENT FILE; replace is its replacement. ".
+                                "The previous patch anchor failed (match count: ".$anchorCount."). ".
+                                "Do not create a file, do not return a full-file replacement, and do not change unrelated code. ".
+                                "Choose the smallest exact unique snippet from CURRENT FILE that implements the requested change. ".
+                                "If no safe unique snippet exists, return both fields as empty strings.".
+                                "\\nTARGET PATH: ".$actualPath.
+                                "\\nREPAIR DIAGNOSTIC: ".$validationMessage.
+                                "\\nREQUESTED CHANGE: ".$patch['replace'].
+                                "\\nFAILED ANCHOR: ".$anchor.
+                                "\\nCURRENT FILE (authoritative):\\n".$currentContent;
+                            $rebasedResult = ai_request_json($rebasePrompt, 1400);
+                            $rebased = json_decode($rebasedResult['text'], true);
+                            if (!is_array($rebased) || !isset($rebased['find'],$rebased['replace'])
+                                || !is_string($rebased['find']) || !is_string($rebased['replace'])
+                                || trim($rebased['find']) === '' || trim($rebased['replace']) === '') {
+                                throw new RuntimeException('AI repair could not safely rebase its patch for '.$actualPath.'; no files were changed.');
+                            }
+                            $anchor = $rebased['find'];
+                            $patch['replace'] = $rebased['replace'];
+                            $anchorCount = substr_count($currentContent, $anchor);
                         }
-                        $patchedFiles[$actualPath] = str_replace($patch['find'], $patch['replace'], $currentContent);
+                        if ($anchorCount !== 1) {
+                            throw new RuntimeException('AI repair patch anchor still did not match exactly once in '.$actualPath.' after safe rebase; no files were changed.');
+                        }
+                        $patchedFiles[$actualPath] = str_replace($anchor, $patch['replace'], $currentContent);
                     } else {
                         if ($patch['find'] !== '') {
                             throw new RuntimeException('AI repair can create a new file only with an empty find value.');
