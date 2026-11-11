@@ -8,7 +8,7 @@ function fixture_project(): array {
         'app/Http/Controllers/Controller.php' => "<?php\nnamespace App\\Http\\Controllers;\nabstract class Controller {}",
         'app/Http/Controllers/StoreController.php' => "<?php\nnamespace App\\Http\\Controllers;\nuse App\\Http\\Controllers\\Controller;\nclass StoreController extends Controller { public function index() { return view('store.index'); } }",
         'routes/web.php' => "<?php\nuse App\\Http\\Controllers\\StoreController;\nRoute::get('/', [StoreController::class, 'index']);",
-        'resources/views/store/index.blade.php' => '@extends("layouts.app")',
+        'resources/views/store/index.blade.php' => '@extends("layouts.app")' . "\n" . '@includeIf("partials.optional")',
         'resources/views/layouts/app.blade.php' => '<html><body>ok</body></html>',
     ];
 }
