@@ -1450,93 +1450,45 @@ SH;
             // General self-repair: let the validator describe the actual defect,
             // then let the model repair every related file in one bounded pass.
             // Runtime/security-owned files are never editable by this repair loop.
-            $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
-            $fileList = implode("\n", array_keys($allGeneratedFiles));
+            // Search the entire project locally, but send only bounded relevant source.
             $context = "";
+            $repairTargetContext = build_repair_source_context($allGeneratedFiles, $validationMessage, 7000);
             $isSettingsSectionDiagnostic = preg_match('/settings section:\\s*(telegram|google|payment|theme|shipping|tax)/i', $validationMessage) === 1;
-            $contextBudget = $isSettingsSectionDiagnostic ? 0 : 2500; // Settings repairs receive focused source excerpts below.
-            // Put the exact files implicated by the validator first; otherwise the
-            // context budget may omit the settings view/controller entirely.
-            $priorityContextPaths = [];
             if ($isSettingsSectionDiagnostic) {
-                $priorityContextPaths = [
+                $prioritySettings = [
                     'resources/views/admin/settings/index.blade.php',
                     'app/Http/Controllers/Admin/SettingsController.php',
                     'routes/web.php',
                     'app/Models/Setting.php',
                     'database/migrations/2025_01_01_000012_create_settings_table.php',
                 ];
-            }
-            $contextOrder = [];
-            foreach ($priorityContextPaths as $priorityPath) {
-                if (isset($allGeneratedFiles[$priorityPath])) $contextOrder[$priorityPath] = $allGeneratedFiles[$priorityPath];
-            }
-            foreach ($allGeneratedFiles as $contextPath=>$contextContent) {
-                if (!isset($contextOrder[$contextPath])) $contextOrder[$contextPath] = $contextContent;
-            }
-            foreach ($contextOrder as $contextPath=>$contextContent) {
-                if (in_array($contextPath, $protectedPaths, true)) continue;
-                $contextExcerpt = strlen($contextContent) > 900
-                    ? substr($contextContent, 0, 450)."\n... middle omitted ...\n".substr($contextContent, -450)
-                    : $contextContent;
-                $entry = "\n\n===== ".$contextPath." =====\n".$contextExcerpt;
-                if (strlen($context) + strlen($entry) > $contextBudget) break;
-                $context .= $entry;
-            }
-            // Supply exact source anchors for every configurable settings section.
-            $repairTargetContext = "";
-            if ($isSettingsSectionDiagnostic) {
-                $viewPath = 'resources/views/admin/settings/index.blade.php';
-                $controllerPath = 'app/Http/Controllers/Admin/SettingsController.php';
-                $routesPath = 'routes/web.php';
-                if (isset($allGeneratedFiles[$viewPath])) {
-                    $repairTargetContext .= "\n\n===== COMPLETE ".$viewPath." =====\n".$allGeneratedFiles[$viewPath];
-                }
-                if (isset($allGeneratedFiles[$controllerPath])) {
-                    // The complete controller is required to repair malformed method
-                    // nesting/braces; excerpts can hide the actual class boundary.
-                    $repairTargetContext .= "\n\n===== COMPLETE ".$controllerPath." =====\n".$allGeneratedFiles[$controllerPath];
-                }
-                if (isset($allGeneratedFiles[$routesPath])) {
-                    $repairTargetContext .= "\n\n===== COMPLETE ".$routesPath." =====\n".$allGeneratedFiles[$routesPath];
-                }
-                foreach ($allGeneratedFiles as $settingsPath=>$settingsSource) {
-                    if (str_starts_with($settingsPath, 'resources/views/admin/settings/')) {
-                        $repairTargetContext .= "\n\n===== COMPLETE ".$settingsPath." =====\n".$settingsSource;
-                    }
-                }
-                foreach (['database/migrations/2025_01_01_000012_create_settings_table.php','app/Models/Setting.php','resources/views/admin/layout.blade.php','resources/views/layouts/admin.blade.php'] as $extraPath) {
-                    if (isset($allGeneratedFiles[$extraPath])) {
-                        $repairTargetContext .= "\n\n===== ".$extraPath." =====\n".$allGeneratedFiles[$extraPath];
-                    }
+                foreach ($prioritySettings as $priorityPath) {
+                    if (!isset($allGeneratedFiles[$priorityPath]) || str_contains($repairTargetContext, '===== EXISTING SOURCE: '.$priorityPath.' ')) continue;
+                    $remaining = max(0, 9000 - strlen($repairTargetContext));
+                    if ($remaining < 500) break;
+                    $source = (string)$allGeneratedFiles[$priorityPath];
+                    $source = strlen($source) > $remaining - 100 ? substr($source, 0, max(0, $remaining - 100)) : $source;
+                    $repairTargetContext .= "\n\n===== PRIORITY EXISTING SOURCE: ".$priorityPath." =====\n".$source;
                 }
             }
+            if (strlen($repairTargetContext) > 9000) $repairTargetContext = substr($repairTargetContext, 0, 9000);
             $repairHistory[] = ['attempt'=>$repairAttempt+1,'error'=>substr($validationMessage,0,500)];
             progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
                 'stage'=>'auto_repair','percent'=>80,'files_created'=>count($allGeneratedFiles),
                 'repair_attempt'=>$repairAttempt+1,'repair_completed_attempts'=>$completedRepairAttempts,
                 'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/'.$maxRepairAttempts.')']);
 
-            $repairPrompt = $system.
-                "\n\nAUTONOMOUS PROJECT REPAIR TASK.".
-                "\nThe complete Laravel project already exists. The validator failed with this exact diagnostic: ".$validationMessage.
-                "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
-                "\nRelevant project file paths:\n".implode("\n", array_slice(array_keys($allGeneratedFiles), 0, 35)).
-                "\n\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
-                "\n\nYou MUST use the whole-project scan report before proposing patches. Search the full path index and reference map for existing files first. If a likely file exists anywhere, patch/reuse its real path; do not create a second copy. If references disagree, repair the existing wiring (routes/controller/view/nav) consistently. Only create a file when the scan proves no matching path or equivalent view exists.".
-                "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty string for a new file\",\"replace\":\"replacement snippet or complete new file content\"}]}.".
-                "\nReturn 1 to 8 minimal patches only. For an existing path, find must be non-empty and match exactly once. For a new path, find must be the empty string and replace must contain the complete new file. Never replace an existing file wholesale.".
-                "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
-                "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
-                "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
-                "\nFor content validation errors, fix the actual implementation rather than inserting placeholder text or bypassing validation.".
-                "\nFor ANY Owner Admin Panel settings-section diagnostic (telegram, google, payment, theme, shipping or tax), repair the complete settings navigation, controller methods, routes, and Blade views as needed. Inspect every supplied settings file before deciding what is missing. Reuse an existing view when suitable; create a missing view with a new-file patch when necessary. Every section must be a real owner-admin-only, CSRF-protected form with validation, persistence through the existing Setting model/schema, and saved values loaded back into the form. Fix malformed method/class braces rather than adding nested methods. Shipping must persist base_rate and per_km_rate; tax must persist tax_rate. Ensure route names, controller return view names, navigation links, and actual view paths agree. Preserve existing Telegram, Google OAuth, payment, theme and general settings, including encryption and blank-secret preservation. Do not remove unrelated settings or replace existing files wholesale.".
-                "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
-                "\nUSER REQUEST:\n".$prompt.
-                "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context.$repairTargetContext;
+            $repairPrompt =
+                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\\"patches\\":[{\\"path\\":\\"relative/path\\",\\"find\\":\\"exact existing snippet or empty for new file\\",\\"replace\\":\\"replacement snippet or complete new file\\"}]}. ".
+                "The full saved project was scanned locally. Use the supplied complete path index and ranked matches to locate existing files before deciding anything is missing. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
+                "Repair only the diagnosed root cause and directly related wiring. Return 1 to 8 minimal patches. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
+                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials.".
+                "\\nDIAGNOSTIC: ".substr($validationMessage, 0, 1200).
+                "\\n\\nPROJECT SCAN AND COMPLETE PATH INDEX:\\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
+                "\\n\\nRELEVANT EXISTING SOURCE FILES (bounded excerpts; confirm exact anchors):".$repairTargetContext;
 
             try {
-                $repairResult = ai_request_json($repairPrompt, 3000);
+                $repairResult = ai_request_json($repairPrompt, 1800);
                 $repairData = json_decode($repairResult['text'], true);
                 if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
                     || count($repairData['patches']) < 1 || count($repairData['patches']) > 8) {
