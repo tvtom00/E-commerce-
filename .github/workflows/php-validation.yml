@@ -30,7 +30,10 @@ jobs:
           coverage: none
 
       - name: PHP syntax validation
-        run: php -l public/index.php
+        run: find public -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Test generated-project contract validation
+        run: php tests/project_validation_test.php
 
       - name: Verify runtime and deployment files
         run: |

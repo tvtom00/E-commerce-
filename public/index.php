@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__.'/project_validation.php';
+
 const MAX_REQUEST_BYTES = 12000;
 const MAX_OUTPUT_FILES = 2000;
 const MAX_FILE_BYTES = 524288;
@@ -725,6 +727,7 @@ function validate_laravel_project(array $rawFiles): array {
     if (!str_contains($all, 'Crypt::encryptString') || !str_contains($all, 'Crypt::decryptString')) {
         throw new RuntimeException('Payment and integration secrets must be encrypted at rest.');
     }
+    nira_validate_project_source_contracts($files);
     return $files;
 }
 
@@ -870,8 +873,15 @@ function publish_private_github_project(string $projectName, array $files, strin
     github_api('POST', '/repos/'.$owner.'/'.$repoName.'/git/refs', $token, [
         'ref'=>'refs/heads/'.$branch,'sha'=>$commit['sha'],
     ]);
+    $publishedRef = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/git/ref/heads/'.$branch, $token);
+    if (($publishedRef['object']['sha'] ?? '') !== ($commit['sha'] ?? '')) throw new RuntimeException('GitHub branch did not retain the verified project commit.');
+    $remoteTree = github_api('GET', '/repos/'.$owner.'/'.$repoName.'/git/trees/'.$tree['sha'].'?recursive=1', $token);
+    $remoteEntries = [];
+    foreach (($remoteTree['tree'] ?? []) as $entry) if (($entry['type'] ?? '') === 'blob' && isset($entry['path'],$entry['sha'])) $remoteEntries[$entry['path']] = $entry['sha'];
+    foreach ($treeItems as $item) if (($remoteEntries[$item['path']] ?? '') !== $item['sha']) throw new RuntimeException('GitHub archive verification failed for generated file: '.$item['path'].'.');
     return ['repository_url'=>$repo['html_url'] ?? ('https://github.com/'.$owner.'/'.$repoName),
         'owner'=>$owner,'repo'=>$repoName,'branch'=>$branch,'approval_required'=>true,
+        'verified_files'=>count($treeItems),
         'download_url'=>'https://github.com/'.$owner.'/'.$repoName.'/archive/refs/heads/'.$branch.'.zip'];
 }
 
@@ -1810,11 +1820,15 @@ SH;
     if ($zip->open($zipPath, ZipArchive::CREATE|ZipArchive::OVERWRITE) !== true) respond(500, ['error'=>'Could not create ZIP.']);
     try {
         foreach ($validatedFiles as $rel => $source) {
-            $zip->addFromString($rel, $source);
+            if (!$zip->addFromString($rel, $source)) throw new RuntimeException('Could not add generated file to ZIP: '.$rel.'.');
         }
-        $zip->close();
-    } catch (Throwable $e) { $zip->close(); respond(422, ['error'=>$e->getMessage()]); }
-        $downloadKey = 'generated/'.$id.'/project.zip';
+        if (!$zip->close()) throw new RuntimeException('Could not finalize generated ZIP archive.');
+        $zipSha256 = verify_generated_project_zip($zipPath, $validatedFiles);
+    } catch (Throwable $e) {
+        $zip->close(); @unlink($zipPath); @rmdir($base);
+        respond(422, ['error'=>'Final ZIP integrity check failed.','detail'=>$e->getMessage()]);
+    }
+    $downloadKey = 'generated/'.$id.'/project.zip';
     if (s3_configured()) {
         try {
             $zipBytes = file_get_contents($zipPath);
@@ -1824,7 +1838,12 @@ SH;
         } catch (Throwable $e) { respond(502, ['error'=>'ZIP created but persistent object-storage upload failed: '.$e->getMessage()]); }
     }
     progress_event('progress', ['stage'=>'archive','percent'=>92,'files_created'=>count($validatedFiles),'message'=>'ZIP ও প্রজেক্ট আর্কাইভ প্রস্তুত হচ্ছে']);
-    $response = ['ok'=>true,'name'=>$name ?: 'website','download'=>'/download.php?id='.$id,'files'=>count($validatedFiles),'storage'=>s3_configured() ? 'external_object_storage' : 'local_ephemeral'];
+    $response = [
+        'ok'=>true,'name'=>$name ?: 'website','download'=>'/download.php?id='.$id,
+        'files'=>count($validatedFiles),'storage'=>s3_configured() ? 'external_object_storage' : 'local_ephemeral',
+        'zip_verified'=>true,'zip_sha256'=>$zipSha256,
+        'validation'=>['complete'=>true,'checks'=>['required_files','php_syntax','app_imports','route_controllers_and_methods','blade_view_references','source_safety','zip_integrity'],'file_count'=>count($validatedFiles)],
+    ];
     $githubToken = envv('NIRA_GITHUB_TOKEN');
     if ($githubToken !== '') {
         try {
