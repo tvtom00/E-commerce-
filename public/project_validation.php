@@ -70,12 +70,13 @@ function nira_validate_project_source_contracts(array $files): void {
                     if(!isset($methodsByPath[$classPath][strtolower($action[2])])) throw new RuntimeException('Route method '.$action[2].'() does not exist in '.$fqcn.' ('.$classPath.').');
                 }
             }
-            if(preg_match_all('/Route::(?:apiResource|resource)\s*\(\s*[\'"][^\'"]+[\'"]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)::class/s',$source,$resources,PREG_SET_ORDER)) {
+            if(preg_match_all('/Route::(apiResource|resource)\s*\(\s*[\'"][^\'"]+[\'"]\s*,\s*([A-Za-z_][A-Za-z0-9_]*)::class/s',$source,$resources,PREG_SET_ORDER)) {
                 foreach($resources as $resource) {
-                    $alias=strtolower($resource[1]); if(!isset($imports[$alias])) continue;
+                    $alias=strtolower($resource[2]); if(!isset($imports[$alias])) continue;
                     $fqcn=$imports[$alias]; $classPath=$symbols[strtolower($fqcn)]??null;
                     if($classPath===null) throw new RuntimeException('Resource controller is missing: '.$fqcn.'.');
-                    foreach(['index','create','store','show','edit','update','destroy'] as $method) if(!isset($methodsByPath[$classPath][$method])) throw new RuntimeException('Resource controller '.$fqcn.' is missing '.$method.'() required by '.$path.'.');
+                    $requiredMethods=$resource[1]==='apiResource'?['index','store','show','update','destroy']:['index','create','store','show','edit','update','destroy'];
+                    foreach($requiredMethods as $method) if(!isset($methodsByPath[$classPath][$method])) throw new RuntimeException('Resource controller '.$fqcn.' is missing '.$method.'() required by '.$path.'.');
                 }
             }
         }
