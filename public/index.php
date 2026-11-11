@@ -1577,60 +1577,67 @@ SH;
                 'repair_attempt'=>$repairAttempt+1,'repair_completed_attempts'=>$completedRepairAttempts,
                 'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/'.$maxRepairAttempts.')']);
 
+            // Keep the complete diagnostic, project index and authoritative source
+            // anchors together. The old independent 2,600-character splitting made
+            // five mismatched slices; most slices had no relevant source and returned
+            // empty patches even though the whole project had already been scanned.
             $scanReport = build_project_scan_report($allGeneratedFiles, $validationMessage);
-            $scanBatches = split_repair_payload_batches($scanReport, 2600);
-            $sourceBatches = split_repair_payload_batches($repairTargetContext, 2600);
-            $batchCount = max(count($scanBatches), count($sourceBatches));
             $repairData = ['patches'=>[]];
             $seenPatchKeys = [];
             $baseRepairInstructions =
                 "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
-                "The complete saved project is scanned locally; this is one numbered slice of its full path/reference report. Never infer that a file is missing from one slice. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
-                "Repair only the diagnosed root cause and directly related wiring. Return zero to 2 minimal patches for this slice. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
+                "The COMPLETE saved project was scanned locally. The following report is the complete bounded path/reference index, not a partial slice. Use it to locate exact files named by the diagnostic and check for equivalent files before proposing a new path. ".
+                "Repair only the diagnosed root cause and directly related wiring. Return up to 6 minimal patches. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
                 ($isOrderPolicyDiagnostic
-                    ? "For OrderPolicy specifically, repair the EXISTING app/Policies/OrderPolicy.php only. Read its supplied source and authorization dependencies before proposing a patch. Match existing role names and ownership rules; do not grant all users access, assume role names, or create another policy file. If this slice lacks the exact policy source/anchor, return an empty patches array. "
+                    ? "For OrderPolicy specifically, repair the EXISTING app/Policies/OrderPolicy.php only. Read its supplied source and authorization dependencies before proposing a patch. Match existing role names and ownership rules; do not grant all users access, assume role names, or create another policy file. "
                     : "").
-                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials. If this slice does not contain enough exact evidence for a safe patch, return {\"patches\":[]}.".
-                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 900);
+                "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials. If no safe patch is possible from the supplied exact source, return {\"patches\":[]}.".
+                "\nEXACT VALIDATION DIAGNOSTIC: ".substr($validationMessage, 0, 1400);
             try {
-                for ($batchIndex = 0; $batchIndex < $batchCount; $batchIndex++) {
-                    $scanPart = $scanBatches[$batchIndex] ?? '';
-                    $sourcePart = $sourceBatches[$batchIndex] ?? '';
-                    $repairPrompt = $baseRepairInstructions.
-                        "\\nBATCH ".($batchIndex+1)." OF ".$batchCount." (independent slice; do not assume omitted context):".
-                        "\\nPROJECT SCAN / PATH INDEX SLICE:\\n".$scanPart.
-                        "\\nRELEVANT EXISTING SOURCE SLICE (authoritative only for exact anchors):\\n".$sourcePart;
-                    error_log('[NIRA_BUILDER_REPAIR] batch='.($batchIndex+1).'/'.$batchCount.' prompt_chars='.strlen($repairPrompt));
-                    $repairResult = ai_request_json($repairPrompt, 700);
-                    $batchData = json_decode($repairResult['text'], true);
-                    if (!is_array($batchData) || !isset($batchData['patches']) || !is_array($batchData['patches'])
-                        || count($batchData['patches']) > 2) {
-                        throw new RuntimeException('AI repair batch '.($batchIndex+1).' returned invalid JSON or more than 2 patches; no patches were applied.');
+                $repairPrompt = $baseRepairInstructions.
+                    "\nCOMPLETE PROJECT SCAN / PATH INDEX:\n".$scanReport.
+                    "\nRELEVANT EXISTING SOURCE (authoritative for exact patch anchors):\n".$repairTargetContext;
+                error_log('[NIRA_BUILDER_REPAIR] mode=coherent_single_pass prompt_chars='.strlen($repairPrompt).' source_chars='.strlen($repairTargetContext));
+                $repairResult = ai_request_json($repairPrompt, 1800);
+                $repairData = json_decode($repairResult['text'], true);
+                if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
+                    || count($repairData['patches']) > 6) {
+                    throw new RuntimeException('AI repair returned invalid JSON or more than 6 patches; no patches were applied.');
+                }
+                // A valid empty response gets one focused retry. Keep the checkpoint
+                // untouched until the proposed patch passes all exact-anchor and
+                // project safety checks below.
+                if (count($repairData['patches']) === 0) {
+                    for ($waited = 0; $waited < 15; $waited += 5) {
+                        sleep(5);
+                        sse_keepalive();
                     }
-                    foreach ($batchData['patches'] as $batchPatch) {
-                        if (!is_array($batchPatch) || !isset($batchPatch['path'],$batchPatch['find'],$batchPatch['replace'])
-                            || !is_string($batchPatch['path']) || !is_string($batchPatch['find']) || !is_string($batchPatch['replace'])
-                            || trim($batchPatch['replace']) === '') {
-                            throw new RuntimeException('AI repair batch '.($batchIndex+1).' returned a malformed patch; no patches were applied.');
-                        }
-                        $dedupeKey = canonical_file_path_key($batchPatch['path'])."\\n".$batchPatch['find'];
-                        if (isset($seenPatchKeys[$dedupeKey])) continue;
-                        $seenPatchKeys[$dedupeKey] = true;
-                        $repairData['patches'][] = $batchPatch;
-                        if (count($repairData['patches']) > 8) {
-                            throw new RuntimeException('AI repair produced more than 8 total patches; no patches were applied.');
-                        }
+                    $focusedSource = build_repair_source_context($allGeneratedFiles, $validationMessage, 7000);
+                    $focusedPrompt = $baseRepairInstructions.
+                        "\nFOCUSED REPAIR RETRY: The previous valid response contained no patches. Re-check this exact validation failure against the source-first context. If the diagnostic names a missing required path, verify the complete path index before creating it. If it names behavior missing from an existing file, propose the smallest exact unique snippet patch. Do not return an empty list merely because the previous response was empty.".
+                        "\nCOMPLETE PROJECT PATH INDEX:\n".$scanReport.
+                        "\nFOCUSED EXISTING SOURCE:\n".$focusedSource;
+                    error_log('[NIRA_BUILDER_REPAIR] mode=focused_retry prompt_chars='.strlen($focusedPrompt).' source_chars='.strlen($focusedSource));
+                    $retryResult = ai_request_json($focusedPrompt, 2200);
+                    $retryData = json_decode($retryResult['text'], true);
+                    if (!is_array($retryData) || !isset($retryData['patches']) || !is_array($retryData['patches'])
+                        || count($retryData['patches']) > 6) {
+                        throw new RuntimeException('Focused AI repair retry returned invalid JSON; no patches were applied.');
                     }
-                    if ($batchIndex + 1 < $batchCount) {
-                        // Two requests per rolling minute at most; allow headroom under a 7,500 TPM provider limit.
-                        for ($waited = 0; $waited < 35; $waited += 5) {
-                            sleep(5);
-                            sse_keepalive();
-                        }
+                    $repairData = $retryData;
+                }
+                foreach ($repairData['patches'] as $batchPatch) {
+                    if (!is_array($batchPatch) || !isset($batchPatch['path'],$batchPatch['find'],$batchPatch['replace'])
+                        || !is_string($batchPatch['path']) || !is_string($batchPatch['find']) || !is_string($batchPatch['replace'])
+                        || trim($batchPatch['replace']) === '') {
+                        throw new RuntimeException('AI repair returned a malformed patch; no patches were applied.');
                     }
+                    $dedupeKey = canonical_file_path_key($batchPatch['path'])."\\n".$batchPatch['find'];
+                    if (isset($seenPatchKeys[$dedupeKey])) continue;
+                    $seenPatchKeys[$dedupeKey] = true;
                 }
                 if (count($repairData['patches']) < 1) {
-                    throw new RuntimeException('No safe, evidence-backed repair patch was returned across '. $batchCount .' batches; checkpoint was not changed.');
+                    throw new RuntimeException('No safe, evidence-backed repair patch was returned after the coherent repair pass and focused retry; checkpoint was not changed.');
                 }
                 $patchedFiles = [];
                 foreach ($repairData['patches'] as $patch) {
