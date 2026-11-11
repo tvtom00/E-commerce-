@@ -1487,7 +1487,7 @@ SH;
     // exact path from the saved project context. Never restart completed batches.
     $validatedFiles = null;
     $repairHistory = [];
-    $maxRepairAttempts = 16; // Preserve prior work while allowing four additional bounded repairs after preflight.
+    $maxRepairAttempts = 18; // Preserve prior work while allowing a few bounded targeted repairs.
     $completedRepairAttempts = max(0, min($maxRepairAttempts, (int)($repairState['completed_attempts'] ?? 0)));
     for ($repairAttempt = $completedRepairAttempts; $repairAttempt <= $maxRepairAttempts; $repairAttempt++) {
         try {
@@ -1506,6 +1506,26 @@ SH;
             $context = "";
             $repairTargetContext = build_repair_source_context($allGeneratedFiles, $validationMessage, 5000);
             $isSettingsSectionDiagnostic = preg_match('/settings section:\\s*(telegram|google|payment|theme|shipping|tax)/i', $validationMessage) === 1;
+            $isOrderPolicyDiagnostic = stripos($validationMessage, 'app/Policies/OrderPolicy.php') !== false;
+            if ($isOrderPolicyDiagnostic) {
+                // Always include the existing policy plus its authorization dependencies.
+                $priorityOrderPolicy = [
+                    'app/Policies/OrderPolicy.php',
+                    'app/Models/Order.php',
+                    'app/Models/User.php',
+                    'app/Http/Controllers/Admin/OrderController.php',
+                    'app/Http/Middleware/EnsureRole.php',
+                    'routes/web.php',
+                ];
+                foreach ($priorityOrderPolicy as $priorityPath) {
+                    if (!isset($allGeneratedFiles[$priorityPath]) || str_contains($repairTargetContext, '===== EXISTING SOURCE: '.$priorityPath.' ') || str_contains($repairTargetContext, '===== PRIORITY EXISTING SOURCE: '.$priorityPath.' ')) continue;
+                    $remaining = max(0, 9000 - strlen($repairTargetContext));
+                    if ($remaining < 500) break;
+                    $source = (string)$allGeneratedFiles[$priorityPath];
+                    $source = strlen($source) > $remaining - 100 ? substr($source, 0, max(0, $remaining - 100)) : $source;
+                    $repairTargetContext .= "\n\n===== PRIORITY EXISTING SOURCE: ".$priorityPath." =====\n".$source;
+                }
+            }
             if ($isSettingsSectionDiagnostic) {
                 $prioritySettings = [
                     'resources/views/admin/settings/index.blade.php',
@@ -1534,6 +1554,9 @@ SH;
                 "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
                 "The full saved project was scanned locally. Use the supplied complete path index and ranked matches to locate existing files before deciding anything is missing. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
                 "Repair only the diagnosed root cause and directly related wiring. Return 1 to 8 minimal patches. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
+                ($isOrderPolicyDiagnostic
+                    ? "For OrderPolicy specifically, repair the EXISTING app/Policies/OrderPolicy.php only. Read the provided Order, User, OrderController, EnsureRole and route source first. Implement a real Laravel OrderPolicy with the authorization abilities actually used by the project (at minimum viewAny, view, create, update, delete, restore and forceDelete where applicable), matching existing role names and ownership rules. Do not grant all users access, do not assume admin role names, and do not create another policy file. Ensure the patch uses a unique exact anchor copied from the supplied existing policy. "
+                    : "").
                 "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials.".
                 "\nDIAGNOSTIC: ".substr($validationMessage, 0, 1200).
                 "\n\nPROJECT SCAN AND COMPLETE PATH INDEX:\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
