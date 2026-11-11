@@ -1525,7 +1525,7 @@ SH;
     // exact path from the saved project context. Never restart completed batches.
     $validatedFiles = null;
     $repairHistory = [];
-    $maxRepairAttempts = 12; // Bounded continuation beyond the previous eight-attempt ceiling.
+    $maxRepairAttempts = 16; // Preserve prior work while allowing four additional bounded repairs after preflight.
     $completedRepairAttempts = max(0, min($maxRepairAttempts, (int)($repairState['completed_attempts'] ?? 0)));
     for ($repairAttempt = $completedRepairAttempts; $repairAttempt <= $maxRepairAttempts; $repairAttempt++) {
         try {
