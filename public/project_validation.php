@@ -2,65 +2,23 @@
 declare(strict_types=1);
 
 
-/** Catch the common closure-scope bug where DB::transaction uses an outer variable without capturing it. */
-function nira_validate_transaction_closure_captures(string $path,array $tokens): void {
-    $count=count($tokens);
-    $superglobals=['this','_SERVER','_GET','_POST','_FILES','_COOKIE','_SESSION','_REQUEST','_ENV','GLOBALS','argc','argv'];
-    $assignmentIds=array_filter([
-        defined('T_PLUS_EQUAL')?T_PLUS_EQUAL:null, defined('T_MINUS_EQUAL')?T_MINUS_EQUAL:null,
-        defined('T_MUL_EQUAL')?T_MUL_EQUAL:null, defined('T_DIV_EQUAL')?T_DIV_EQUAL:null,
-        defined('T_CONCAT_EQUAL')?T_CONCAT_EQUAL:null, defined('T_MOD_EQUAL')?T_MOD_EQUAL:null,
-        defined('T_AND_EQUAL')?T_AND_EQUAL:null, defined('T_OR_EQUAL')?T_OR_EQUAL:null,
-        defined('T_XOR_EQUAL')?T_XOR_EQUAL:null, defined('T_SL_EQUAL')?T_SL_EQUAL:null,
-        defined('T_SR_EQUAL')?T_SR_EQUAL:null, defined('T_COALESCE_EQUAL')?T_COALESCE_EQUAL:null,
-    ],static fn($value)=>$value!==null);
-    for($i=0;$i<$count;$i++) {
-        if(!is_array($tokens[$i])||$tokens[$i][0]!==T_FUNCTION) continue;
-        $prefix='';
-        for($k=max(0,$i-18);$k<$i;$k++) $prefix.=is_array($tokens[$k])?$tokens[$k][1]:$tokens[$k];
-        if(!preg_match('/transaction\s*\(\s*(?:static\s*)?$/i',$prefix)) continue;
-        $cursor=$i+1;
-        while($cursor<$count&&is_array($tokens[$cursor])&&in_array($tokens[$cursor][0],[T_WHITESPACE,T_COMMENT,T_DOC_COMMENT],true)) $cursor++;
-        if(isset($tokens[$cursor])&&$tokens[$cursor]==='&') $cursor++;
-        if(isset($tokens[$cursor])&&is_array($tokens[$cursor])&&$tokens[$cursor][0]===T_STRING) continue;
-        if(!isset($tokens[$cursor])||$tokens[$cursor]!=='(') continue;
-        $depth=0; $parameterTokens=[]; $closed=false;
-        for(;$cursor<$count;$cursor++) {
-            $token=$tokens[$cursor]; if($token==='(') $depth++;
-            if($depth>0) $parameterTokens[]=$token;
-            if($token===')'&&--$depth===0) { $closed=true; $cursor++; break; }
+/** Catch a request object used inside a DB transaction closure without being captured. */
+function nira_validate_transaction_closure_captures(string $path,string $source): void {
+    $pattern='/DB::transaction\s*\(\s*function\s*\(([^)]*)\)\s*(?:use\s*\(([^)]*)\))?\s*\{(.*?)\}\s*\)/s';
+    if(!preg_match_all($pattern,$source,$matches,PREG_SET_ORDER)) return;
+    $requestVariable=chr(36).'request';
+    foreach($matches as $match) {
+        $parameters=$match[1]??'';
+        $captures=$match[2]??'';
+        $body=$match[3]??'';
+        if(str_contains($body,$requestVariable)
+            && !str_contains($parameters,$requestVariable)
+            && !str_contains($captures,$requestVariable)) {
+            throw new RuntimeException('Transaction closure in '.$path.' uses uncaptured variable '.$requestVariable.'. Add it to use(...) or pass it as a parameter.');
         }
-        if(!$closed) continue;
-        $allowed=[];
-        foreach($parameterTokens as $token) if(is_array($token)&&$token[0]===T_VARIABLE) $allowed[$token[1]]=true;
-        while($cursor<$count&&is_array($tokens[$cursor])&&in_array($tokens[$cursor][0],[T_WHITESPACE,T_COMMENT,T_DOC_COMMENT],true)) $cursor++;
-        if(isset($tokens[$cursor])&&is_array($tokens[$cursor])&&$tokens[$cursor][0]===T_USE) {
-            $cursor++;
-            while($cursor<$count&&is_array($tokens[$cursor])&&in_array($tokens[$cursor][0],[T_WHITESPACE,T_COMMENT,T_DOC_COMMENT],true)) $cursor++;
-            if(($tokens[$cursor]??null)==='(') {
-                $useDepth=0;
-                for(;$cursor<$count;$cursor++) {
-                    $token=$tokens[$cursor]; if($token==='(') $useDepth++;
-                    if($useDepth>0&&is_array($token)&&$token[0]===T_VARIABLE) $allowed[$token[1]]=true;
-                    if($token===')'&&--$useDepth===0) { $cursor++; break; }
-                }
-            }
-        }
-        while($cursor<$count&&$tokens[$cursor]!=='{') $cursor++;
-        if($cursor>=$count) continue;
-        $bodyStart=$cursor; $bodyDepth=0; $bodyTokens=[];
-        for(;$cursor<$count;$cursor++) {
-            $token=$tokens[$cursor];
-            if($token==='{') $bodyDepth++;
-            if($bodyDepth>0) $bodyTokens[]=$token;
-            if($token==='}'&&--$bodyDepth===0) break;
-        }
-        $bodyCount=count($bodyTokens);
-        for($j=0;$j<$bodyCount;$j++) {
-            $token=$bodyTokens[$j];
-            if(!is_array($token)||$token[0]!==T_VARIABLE) continue;
-            $name=$token[1];
-            if(isset($allowed[$name])||in_array(ltrim($name,'
+    }
+}
+
 function nira_validate_project_source_contracts(array $files): void {
     $symbols=[]; $methodsByPath=[];
     foreach($files as $path=>$source) {
@@ -68,7 +26,7 @@ function nira_validate_project_source_contracts(array $files): void {
         if(!$isPhp) continue;
         try { $tokens=token_get_all($source,TOKEN_PARSE); }
         catch(ParseError $error) { throw new RuntimeException('PHP syntax error in '.$path.' at line '.$error->getLine().': '.$error->getMessage()); }
-        nira_validate_transaction_closure_captures($path,$tokens);
+        nira_validate_transaction_closure_captures($path,$source);
         $namespace='';
         if(preg_match('/(?m)^\s*namespace\s+([^;{]+)\s*[;{]/',$source,$nm)) $namespace=trim($nm[1]," \t\n\r\\");
         $methods=[]; $count=count($tokens);
