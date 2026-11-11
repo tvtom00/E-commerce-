@@ -102,7 +102,7 @@ function nira_validate_project_source_contracts(array $files): void {
     foreach($files as $sourcePath=>$source) {
         $viewNames=[];
         if(preg_match_all('/\bview\s*\(\s*[\'"]([^\'"]+)[\'"]/',$source,$m)) $viewNames=array_merge($viewNames,$m[1]);
-        if(preg_match_all('/@(?:extends|include|includeIf|each|component)\s*\(\s*[\'"]([^\'"]+)[\'"]/',$source,$m)) $viewNames=array_merge($viewNames,$m[1]);
+        if(preg_match_all('/@(?:extends|include|each|component)\s*\(\s*[\'"]([^\'"]+)[\'"]/',$source,$m)) $viewNames=array_merge($viewNames,$m[1]);
         if(preg_match_all('/@include(?:When|Unless)\s*\([^,]+,\s*[\'"]([^\'"]+)[\'"]/',$source,$m)) $viewNames=array_merge($viewNames,$m[1]);
         foreach(array_unique($viewNames) as $viewName) {
             if($viewName===''||str_contains($viewName,'::')||str_contains($viewName,'*')) continue;
