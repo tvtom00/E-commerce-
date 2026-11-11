@@ -5,9 +5,9 @@ require __DIR__.'/../public/project_validation.php';
 
 function fixture_project(): array {
     return [
-        'app/Http/Controllers/Controller.php' => '<?php namespace App\\Http\\Controllers; abstract class Controller {}',
-        'app/Http/Controllers/StoreController.php' => '<?php namespace App\\Http\\Controllers; use App\\Http\\Controllers\\Controller; class StoreController extends Controller { public function index() { return view("store.index"); } }',
-        'routes/web.php' => '<?php use App\\Http\\Controllers\\StoreController; Route::get("/", [StoreController::class, "index"]);',
+        'app/Http/Controllers/Controller.php' => "<?php\nnamespace App\\Http\\Controllers;\nabstract class Controller {}",
+        'app/Http/Controllers/StoreController.php' => "<?php\nnamespace App\\Http\\Controllers;\nuse App\\Http\\Controllers\\Controller;\nclass StoreController extends Controller { public function index() { return view('store.index'); } }",
+        'routes/web.php' => "<?php\nuse App\\Http\\Controllers\\StoreController;\nRoute::get('/', [StoreController::class, 'index']);",
         'resources/views/store/index.blade.php' => '@extends("layouts.app")',
         'resources/views/layouts/app.blade.php' => '<html><body>ok</body></html>',
     ];
@@ -26,27 +26,27 @@ $valid=fixture_project();
 nira_validate_project_source_contracts($valid);
 
 $broken=$valid;
-$broken['app/Policies/OrderPolicy.php']='<?php namespace App\\Policies; class OrderPolicy { public function broken( { }';
+$broken['app/Policies/OrderPolicy.php']="<?php\nnamespace App\\Policies;\nclass OrderPolicy { public function broken( { }";
 expect_project_failure($broken,'PHP syntax error');
 
 $broken=$valid;
-$broken['routes/web.php']='<?php use App\\Http\\Controllers\\MissingController; Route::get("/", [MissingController::class, "index"]);';
+$broken['routes/web.php']="<?php\nuse App\\Http\\Controllers\\MissingController;\nRoute::get('/', [MissingController::class, 'index']);";
 expect_project_failure($broken,'Unresolved App import');
 
 $broken=$valid;
-$broken['routes/web.php']='<?php use App\\Http\\Controllers\\StoreController; Route::get("/", [StoreController::class, "missing"]);';
+$broken['routes/web.php']="<?php\nuse App\\Http\\Controllers\\StoreController;\nRoute::get('/', [StoreController::class, 'missing']);";
 expect_project_failure($broken,'Route method missing()');
 
 $broken=$valid;
-$broken['app/Http/Controllers/StoreController.php']='<?php namespace App\\Http\\Controllers; use App\\Http\\Controllers\\Controller; class StoreController extends Controller { public function index($request) { return DB::transaction(function () { return $request->user(); }); } }';
+$broken['app/Http/Controllers/StoreController.php']="<?php\nnamespace App\\Http\\Controllers;\nuse App\\Http\\Controllers\\Controller;\nclass StoreController extends Controller { public function index() { return DB::transaction(function () { return \$request->user(); }); } }";
 expect_project_failure($broken,'uncaptured variable $request');
 
 $broken=$valid;
-$broken['app/Http/Controllers/StoreController.php']='<?php namespace App\\Http\\Controllers; use App\\Http\\Controllers\\Controller; class StoreController extends Controller { public function index() { return view("store.missing"); } }';
+$broken['app/Http/Controllers/StoreController.php']="<?php\nnamespace App\\Http\\Controllers;\nuse App\\Http\\Controllers\\Controller;\nclass StoreController extends Controller { public function index() { return view('store.missing'); } }";
 expect_project_failure($broken,'Referenced Blade view is missing');
 
 $broken=$valid;
-$broken['app/Http/Controllers/StoreController.php']='<?php namespace App\\Http\\Controllers; class WrongName {}';
+$broken['app/Http/Controllers/StoreController.php']="<?php\nnamespace App\\Http\\Controllers;\nclass WrongName {}";
 expect_project_failure($broken,'PSR-4 class path mismatch');
 
 if(!class_exists(ZipArchive::class)) throw new RuntimeException('ZIP extension is required for this test.');
