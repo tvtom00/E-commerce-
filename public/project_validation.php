@@ -110,6 +110,94 @@ function nira_validate_project_source_contracts(array $files): void {
             if(!array_key_exists($viewPath,$files)) throw new RuntimeException('Referenced Blade view is missing: '.$viewPath.' (referenced by '.$sourcePath.').');
         }
     }
+    nira_validate_model_schema_columns($files);
+}
+
+
+/** Compare model mass-assignment/cast fields with the columns defined by migrations. */
+function nira_infer_model_table_name(string $className): string {
+    $snake=preg_replace_callback('/[A-Z]/',static fn($m)=>'_'.strtolower($m[0]),$className);
+    $snake=ltrim((string)$snake,'_');
+    if(preg_match('/[^aeiou]y$/',$snake)) return substr($snake,0,-1).'ies';
+    if(preg_match('/(s|x|z|ch|sh)$/',$snake)) return $snake.'es';
+    return $snake.'s';
+}
+
+function nira_validate_model_schema_columns(array $files): void {
+    $tables=[];
+    $columnMethods=[
+        'char','string','tinyText','text','mediumText','longText','integer','tinyInteger',
+        'smallInteger','mediumInteger','bigInteger','unsignedInteger','unsignedTinyInteger',
+        'unsignedSmallInteger','unsignedMediumInteger','unsignedBigInteger','float','double',
+        'decimal','unsignedDecimal','boolean','date','dateTime','dateTimeTz','time','timeTz',
+        'timestamp','timestampTz','year','json','jsonb','binary','uuid','ulid','enum','set',
+        'foreignId','foreignUuid','ipAddress','macAddress','geometry','point','lineString',
+        'polygon','multiPoint','multiLineString','multiPolygon','geometryCollection',
+    ];
+    foreach($files as $path=>$source) {
+        if(!str_starts_with($path,'database/migrations/')||!str_ends_with(strtolower($path),'.php')) continue;
+        if(!preg_match_all('/Schema::(?:create|table)\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*function\s*\([^)]*\)\s*\{(.*?)\}\s*\)\s*;/s',$source,$blocks,PREG_SET_ORDER)) continue;
+        foreach($blocks as $block) {
+            $tableName=$block[1];
+            $tables[$tableName]=$tables[$tableName]??[];
+            $body=$block[2];
+            if(preg_match_all('/\$table\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?:[\'"]([^\'"]+)[\'"])?/',$body,$columns,PREG_SET_ORDER)) {
+                foreach($columns as $column) {
+                    $method=$column[1]; $columnName=$column[2]??'';
+                    if(in_array($method,['id','bigIncrements','increments'],true)) $tables[$tableName]['id']=true;
+                    elseif(in_array($method,['timestamps','timestampsTz'],true)) { $tables[$tableName]['created_at']=true; $tables[$tableName]['updated_at']=true; }
+                    elseif(in_array($method,['softDeletes','softDeletesTz'],true)) $tables[$tableName]['deleted_at']=true;
+                    elseif($method==='rememberToken') $tables[$tableName]['remember_token']=true;
+                    elseif(in_array($method,['morphs','nullableMorphs','uuidMorphs','nullableUuidMorphs','ulidMorphs','nullableUlidMorphs'],true)&&$columnName!=='') {
+                        $tables[$tableName][$columnName.'_id']=true; $tables[$tableName][$columnName.'_type']=true;
+                    } elseif(in_array($method,$columnMethods,true)&&$columnName!=='') $tables[$tableName][$columnName]=true;
+                }
+            }
+            if(preg_match_all('/\$table\s*->\s*foreignIdFor\s*\(\s*([A-Za-z_\\\\][A-Za-z0-9_\\\\]*)::class\s*(?:,\s*[\'"]([^\'"]+)[\'"])?/',$body,$foreignFor,PREG_SET_ORDER)) {
+                foreach($foreignFor as $foreign) {
+                    $default=preg_replace('/(?<!^)[A-Z]/','_$0',substr($foreign[1],strrpos($foreign[1],'\\')!==false?strrpos($foreign[1],'\\')+1:0));
+                    $tables[$tableName][($foreign[2]??'')!==''?$foreign[2]:strtolower($default).'_id']=true;
+                }
+            }
+        }
+    }
+    foreach($files as $path=>$source) {
+        if(!preg_match('#^app/Models/([A-Za-z_][A-Za-z0-9_]*)\.php$#',$path,$model)) continue;
+        $className=$model[1];
+        $tableName=nira_infer_model_table_name($className);
+        if(preg_match('/\$table\s*=\s*[\'"]([^\'"]+)[\'"]\s*;/',$source,$explicitTable)) $tableName=$explicitTable[1];
+        if(!isset($tables[$tableName])) throw new RuntimeException('Model '.$className.' has no matching migration table: '.$tableName.'.');
+        $modelFields=[];
+        foreach(['fillable','casts'] as $property) {
+            if(preg_match('/\
+function verify_generated_project_zip(string $zipPath,array $files): string {
+    if(!is_file($zipPath)||filesize($zipPath)===0) throw new RuntimeException('Generated ZIP is missing or empty.');
+    $zip=new ZipArchive(); $opened=$zip->open($zipPath,ZipArchive::CHECKCONS);
+    if($opened!==true) throw new RuntimeException('Generated ZIP failed archive integrity verification (code '.$opened.').');
+    try {
+        if($zip->numFiles!==count($files)) throw new RuntimeException('Generated ZIP entry count mismatch: expected '.count($files).', found '.$zip->numFiles.'.');
+        foreach($files as $path=>$expectedContent) {
+            $actualContent=$zip->getFromName($path);
+            if(!is_string($actualContent)) throw new RuntimeException('Generated ZIP is missing required entry: '.$path.'.');
+            if(!hash_equals(hash('sha256',$expectedContent),hash('sha256',$actualContent))) throw new RuntimeException('Generated ZIP content verification failed for: '.$path.'.');
+        }
+    } finally { $zip->close(); }
+    $hash=hash_file('sha256',$zipPath);
+    if(!is_string($hash)||strlen($hash)!==64) throw new RuntimeException('Could not calculate final ZIP checksum.');
+    return $hash;
+}
+.$property.'\s*=\s*\[(.*?)\]\s*;/s',$source,$arrayMatch)) {
+                if(preg_match_all('/[\'"]([^\'"]+)[\'"]/', $arrayMatch[1], $fieldMatches)) {
+                    foreach($fieldMatches[1] as $field) $modelFields[$field]=true;
+                }
+            }
+        }
+        foreach(array_keys($modelFields) as $field) {
+            if(!isset($tables[$tableName][$field])) {
+                throw new RuntimeException('Model '.$className.' references missing database column '.$tableName.'.'.$field.'. Add it in an up migration or correct the model field.');
+            }
+        }
+    }
 }
 
 /** Re-open the archive and compare every stored entry with the validated source map. */
