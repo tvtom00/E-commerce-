@@ -321,6 +321,115 @@ function canonical_file_path_key(string $path): string {
     return implode('/', $normalized);
 }
 
+/**
+ * Build a read-only, whole-project inventory and dependency/reference report.
+ * Every saved file is scanned; output is bounded before it reaches the AI prompt.
+ */
+function build_project_scan_report(array $files, string $diagnostic): string {
+    $paths = array_keys($files);
+    sort($paths, SORT_NATURAL | SORT_FLAG_CASE);
+    $lines = [];
+    $lines[] = "WHOLE PROJECT FILE SCAN (all ".count($paths)." saved files inspected)";
+    $lines[] = "DIRECTORY INVENTORY:";
+    $dirs = [];
+    foreach ($paths as $path) {
+        $parts = explode('/', $path);
+        array_pop($parts);
+        $current = '';
+        foreach ($parts as $part) {
+            $current = $current === '' ? $part : $current.'/'.$part;
+            $dirs[$current] = ($dirs[$current] ?? 0) + 1;
+        }
+    }
+    ksort($dirs, SORT_NATURAL | SORT_FLAG_CASE);
+    foreach ($dirs as $dir=>$count) $lines[] = $dir.'/ ('.$count.' files)';
+    $lines[] = "COMPLETE FILE PATH INDEX:";
+    foreach ($paths as $path) $lines[] = $path;
+
+    $tokens = [];
+    preg_match_all('/[A-Za-z][A-Za-z0-9_]{2,}/', strtolower($diagnostic), $matches);
+    foreach ($matches[0] as $token) {
+        if (!in_array($token, ['the','and','for','with','from','this','that','must','missing','section','laravel','project','file','files','error','failed','required','does','not','exist','settings'], true)) {
+            $tokens[$token] = true;
+        }
+    }
+    foreach (['route','controller','model','migration','view','blade','settings','shipping','tax','theme','payment','telegram','google'] as $token) {
+        if (stripos($diagnostic, $token) !== false) $tokens[$token] = true;
+    }
+
+    $ranked = [];
+    foreach ($files as $path=>$content) {
+        $lowerPath = strtolower($path);
+        $lowerContent = strtolower($content);
+        $score = 0;
+        $matched = [];
+        foreach (array_keys($tokens) as $token) {
+            if (str_contains($lowerPath, $token)) { $score += 5; $matched[] = 'path:'.$token; }
+            $count = substr_count($lowerContent, $token);
+            if ($count > 0) { $score += min(8, $count); $matched[] = 'content:'.$token.'('.$count.')'; }
+        }
+        if ($score > 0) $ranked[$path] = ['score'=>$score,'matches'=>$matched];
+    }
+    uasort($ranked, static fn($a,$b) => $b['score'] <=> $a['score']);
+
+    $lines[] = "DIAGNOSTIC-RELATED FILES (ranked after scanning every file):";
+    $shown = 0;
+    foreach ($ranked as $path=>$info) {
+        $lines[] = $path." [score ".$info['score'].": ".implode(', ', array_slice($info['matches'],0,12))."]";
+        if (++$shown >= 35) break;
+    }
+
+    // Search for references to every discovered filename stem and Laravel view key.
+    $referenceRows = [];
+    foreach ($files as $sourcePath=>$sourceContent) {
+        foreach ($paths as $targetPath) {
+            if ($sourcePath === $targetPath) continue;
+            $base = pathinfo($targetPath, PATHINFO_FILENAME);
+            $base = preg_replace('/\.blade$/i', '', $base);
+            if (strlen($base) < 4) continue;
+            $needles = [$base];
+            if (str_ends_with($targetPath, '.blade.php')) {
+                $viewKey = preg_replace('#^resources/views/|\.blade\.php$#', '', $targetPath);
+                $needles[] = str_replace('/', '.', $viewKey);
+            }
+            foreach (array_unique($needles) as $needle) {
+                if (stripos($sourceContent, $needle) !== false) {
+                    $referenceRows[$targetPath][$sourcePath] = true;
+                    break;
+                }
+            }
+        }
+    }
+    $lines[] = "CROSS-FILE REFERENCES (where other files mention a target file/view stem):";
+    $refCount = 0;
+    foreach ($referenceRows as $target=>$sources) {
+        $lines[] = $target." <- ".implode(', ', array_keys($sources));
+        if (++$refCount >= 45) break;
+    }
+
+    // Explicit Laravel wiring checks for route -> controller and view() -> Blade paths.
+    $lines[] = "LARAVEL WIRING CHECKS:";
+    foreach ($files as $sourcePath=>$sourceContent) {
+        if ($sourcePath === 'routes/web.php' || str_contains($sourcePath, 'Controller.php')) {
+            if (preg_match_all('/([A-Za-z_][A-Za-z0-9_]*Controller)::class/', $sourceContent, $classes)) {
+                foreach (array_unique($classes[1]) as $class) {
+                    $expected = 'app/Http/Controllers/'.str_replace('\\\\', '/', $class).'.php';
+                    $found = [];
+                    foreach ($paths as $candidate) if (str_ends_with($candidate, '/'.$class.'.php') || $candidate === $expected) $found[] = $candidate;
+                    $lines[] = $sourcePath.": controller ".$class." => ".($found ? implode(', ', $found) : 'NO MATCHING FILE FOUND');
+                }
+            }
+        }
+        if (str_ends_with($sourcePath, '.php') && preg_match_all('/view\\([\\\'\\"]([^\\\'\\"]+)[\\\'\\"]/', $sourceContent, $views)) {
+            foreach (array_unique($views[1]) as $viewKey) {
+                $expected = 'resources/views/'.str_replace('.', '/', $viewKey).'.blade.php';
+                $lines[] = $sourcePath.": view(".$viewKey.") => ".(isset($files[$expected]) ? $expected : 'NO EXACT VIEW PATH; inspect case/path variants');
+            }
+        }
+    }
+    return implode("\n", $lines);
+}
+
 function validate_laravel_project(array $rawFiles): array {
     $required = [
         'Dockerfile','docker/entrypoint.sh','composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
@@ -1406,6 +1515,8 @@ SH;
                 "\nThe complete Laravel project already exists. The validator failed with this exact diagnostic: ".$validationMessage.
                 "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
                 "\nRelevant project file paths:\n".implode("\n", array_slice(array_keys($allGeneratedFiles), 0, 35)).
+                "\n\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
+                "\n\nYou MUST use the whole-project scan report before proposing patches. Search the full path index and reference map for existing files first. If a likely file exists anywhere, patch/reuse its real path; do not create a second copy. If references disagree, repair the existing wiring (routes/controller/view/nav) consistently. Only create a file when the scan proves no matching path or equivalent view exists.".
                 "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty string for a new file\",\"replace\":\"replacement snippet or complete new file content\"}]}.".
                 "\nReturn 1 to 8 minimal patches only. For an existing path, find must be non-empty and match exactly once. For a new path, find must be the empty string and replace must contain the complete new file. Never replace an existing file wholesale.".
                 "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
