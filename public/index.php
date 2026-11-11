@@ -259,7 +259,7 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
                 // tail containing the most relevant source anchors, then retry smaller.
                 $head = substr($requestPrompt, 0, 6500);
                 $tail = substr($requestPrompt, -5500);
-                $requestPrompt = $head."\\n\\n[COMPACT RETRY: full repository scan was performed locally; only strongest source anchors retained]\\n\\n".$tail;
+                $requestPrompt = $head."\n\n[COMPACT RETRY: full repository scan was performed locally; only strongest source anchors retained]\n\n".$tail;
                 $groqRetryOutputTokens = 1000;
                 error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=compact_retry status=413 prompt_chars='.strlen($requestPrompt).' output_tokens=1000');
                 sleep(2);
@@ -414,7 +414,7 @@ function build_project_scan_report(array $files, string $diagnostic): string {
     foreach (array_slice(array_unique($refs), 0, 24) as $line) $lines[] = $line;
     $lines[] = "SEARCH RULE: all saved files were inspected. Search the complete path index, case-insensitive basename, extension/type and ranked content matches before declaring missing. Reuse existing files; never create duplicate equivalents.";
     $report = implode("\n", $lines);
-    return strlen($report) > 10500 ? substr($report, 0, 10500)."\n[scan report compacted; all files were still inspected]" : $report;
+    return strlen($report) > 9500 ? substr($report, 0, 9500)."\n[scan report compacted; all files were still inspected]" : $report;
 }
 
 function build_repair_source_context(array $files, string $diagnostic, int $maxBytes = 7000): string {
@@ -1468,7 +1468,7 @@ SH;
             // Runtime/security-owned files are never editable by this repair loop.
             // Search the entire project locally, but send only bounded relevant source.
             $context = "";
-            $repairTargetContext = build_repair_source_context($allGeneratedFiles, $validationMessage, 7000);
+            $repairTargetContext = build_repair_source_context($allGeneratedFiles, $validationMessage, 5000);
             $isSettingsSectionDiagnostic = preg_match('/settings section:\\s*(telegram|google|payment|theme|shipping|tax)/i', $validationMessage) === 1;
             if ($isSettingsSectionDiagnostic) {
                 $prioritySettings = [
