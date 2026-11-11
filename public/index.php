@@ -1578,7 +1578,25 @@ SH;
                             if (!is_array($rebased) || !isset($rebased['find'],$rebased['replace'])
                                 || !is_string($rebased['find']) || !is_string($rebased['replace'])
                                 || trim($rebased['find']) === '' || trim($rebased['replace']) === '') {
-                                throw new RuntimeException('AI repair could not safely rebase its patch for '.$actualPath.'; no files were changed.');
+                                // Last-resort safe mode: replace the CONTENT of this already-existing
+                                // canonical path, never create another path and never guess an anchor.
+                                // The model receives the authoritative full file and must return it whole.
+                                $fullFilePrompt = "Return JSON only with one string field named content containing the COMPLETE revised file. ".
+                                    "The previous snippet patch could not be safely matched. Rewrite this existing file in full, applying only the requested repair while preserving every unrelated method, permission, validation rule, integration and feature. ".
+                                    "Do not return a diff, excerpt, explanation, markdown fence, or a new path. ".
+                                    "If you cannot preserve the complete file safely, return an empty content string.".
+                                    "\\nEXISTING PATH (must remain exactly this path): ".$actualPath.
+                                    "\\nVALIDATION DIAGNOSTIC: ".$validationMessage.
+                                    "\\nREQUESTED REPAIR: ".$patch['replace'].
+                                    "\\nAUTHORITATIVE COMPLETE CURRENT FILE:\\n".$currentContent;
+                                $fullResult = ai_request_json($fullFilePrompt, 9000);
+                                $fullData = json_decode($fullResult['text'], true);
+                                if (!is_array($fullData) || !isset($fullData['content']) || !is_string($fullData['content'])
+                                    || trim($fullData['content']) === '' || strlen($fullData['content']) > MAX_FILE_BYTES) {
+                                    throw new RuntimeException('AI could not safely rebuild the complete existing file '.$actualPath.'; no files were changed.');
+                                }
+                                $patchedFiles[$actualPath] = $fullData['content'];
+                                continue;
                             }
                             $anchor = $rebased['find'];
                             $patch['replace'] = $rebased['replace'];
