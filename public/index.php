@@ -254,6 +254,22 @@ function ai_request_json(string $prompt, int $maxOutputTokens): array {
             // Gemini capacity errors should fail over immediately. Groq 429s
             // include a rolling TPM reset time; wait for that window and retry
             // with the automatically reduced token budget on the next attempt.
+            if ($provider['name'] === 'Groq' && $code === 413 && $attempt < 3) {
+                // TPM/request-size 413: keep the diagnostic/instructions and a bounded
+                // tail containing the most relevant source anchors, then retry smaller.
+                $head = substr($requestPrompt, 0, 6500);
+                $tail = substr($requestPrompt, -5500);
+                $requestPrompt = $head."\\n\\n[COMPACT RETRY: full repository scan was performed locally; only strongest source anchors retained]\\n\\n".$tail;
+                $groqRetryOutputTokens = 1000;
+                error_log('[NIRA_BUILDER_AI] provider=Groq model='.$model.' action=compact_retry status=413 prompt_chars='.strlen($requestPrompt).' output_tokens=1000');
+                sleep(2);
+                continue;
+            }
+            if ($provider['name'] === 'Gemini' && $code === 0) {
+                // Do not wait through repeated three-minute timeouts; fail over immediately.
+                error_log('[NIRA_BUILDER_AI] provider=Gemini model='.$model.' action=failover timeout');
+                break;
+            }
             if ($provider['name'] === 'Groq' && $code === 429 && $attempt < 3) {
                 $retryDelay = ai_retry_delay_seconds($answer, 20);
                 // Groq TPM errors report the rolling-window limit, tokens already
@@ -1479,13 +1495,13 @@ SH;
                 'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/'.$maxRepairAttempts.')']);
 
             $repairPrompt =
-                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\\"patches\\":[{\\"path\\":\\"relative/path\\",\\"find\\":\\"exact existing snippet or empty for new file\\",\\"replace\\":\\"replacement snippet or complete new file\\"}]}. ".
+                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
                 "The full saved project was scanned locally. Use the supplied complete path index and ranked matches to locate existing files before deciding anything is missing. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
                 "Repair only the diagnosed root cause and directly related wiring. Return 1 to 8 minimal patches. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
                 "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials.".
-                "\\nDIAGNOSTIC: ".substr($validationMessage, 0, 1200).
-                "\\n\\nPROJECT SCAN AND COMPLETE PATH INDEX:\\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
-                "\\n\\nRELEVANT EXISTING SOURCE FILES (bounded excerpts; confirm exact anchors):".$repairTargetContext;
+                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 1200).
+                "\n\nPROJECT SCAN AND COMPLETE PATH INDEX:\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
+                "\n\nRELEVANT EXISTING SOURCE FILES (bounded excerpts; confirm exact anchors):".$repairTargetContext;
 
             try {
                 $repairResult = ai_request_json($repairPrompt, 1800);
