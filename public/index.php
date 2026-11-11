@@ -1721,6 +1721,10 @@ SH;
                 foreach ($patchedFiles as $patchPath=>$patchedContent) {
                     $repairData['files'][] = ['path'=>$patchPath,'content'=>$patchedContent];
                 }
+                // Explicitly define runtime-owned paths before validating AI output.
+                // Previously this variable was undefined, so PHP passed null as the
+                // haystack to in_array() and aborted every repair attempt.
+                $protectedPaths = ['Dockerfile', 'docker/entrypoint.sh', 'public/index.php'];
                 $changedFiles = [];
                 foreach ($repairData['files'] as $repairFile) {
                     if (!is_array($repairFile) || !isset($repairFile['path'],$repairFile['content'])
