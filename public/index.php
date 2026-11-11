@@ -1318,7 +1318,7 @@ SH;
             $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
             $fileList = implode("\n", array_keys($allGeneratedFiles));
             $context = "";
-            $contextBudget = 5000; // Keep repair input bounded while allowing exact repair anchors.
+            $contextBudget = stripos($validationMessage, 'settings section: theme') !== false ? 0 : 2500; // Theme repair uses focused exact source excerpts below.
             // Put the exact files implicated by the validator first; otherwise the
             // context budget may omit the settings view/controller entirely.
             $priorityContextPaths = [];
@@ -1362,16 +1362,16 @@ SH;
                     $helperMarker = '// ---------- Helper methods for status determination ----------';
                     $helperPosition = strpos($controllerSource, $helperMarker);
                     $controllerExcerpt = $helperPosition !== false
-                        ? substr($controllerSource, max(0, $helperPosition - 500), 2600)
-                        : substr($controllerSource, -2600);
+                        ? substr($controllerSource, max(0, $helperPosition - 250), 1400)
+                        : substr($controllerSource, -1400);
                     $repairTargetContext .= "\n\n===== ".$controllerPath." (exact class-tail patch source) =====\n".$controllerExcerpt;
                 }
                 if (isset($allGeneratedFiles[$routesPath])) {
                     $routesSource = $allGeneratedFiles[$routesPath];
                     $routePosition = strpos($routesSource, "Route::get('/settings/general'");
                     $routesExcerpt = $routePosition !== false
-                        ? substr($routesSource, max(0, $routePosition - 300), 1800)
-                        : substr($routesSource, -1800);
+                        ? substr($routesSource, max(0, $routePosition - 150), 1000)
+                        : substr($routesSource, -1000);
                     $repairTargetContext .= "\n\n===== ".$routesPath." (exact settings-routes patch source) =====\n".$routesExcerpt;
                 }
             }
