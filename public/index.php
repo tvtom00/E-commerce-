@@ -1301,14 +1301,15 @@ SH;
     // exact path from the saved project context. Never restart completed batches.
     $validatedFiles = null;
     $repairHistory = [];
-    $completedRepairAttempts = max(0, min(8, (int)($repairState['completed_attempts'] ?? 0)));
-    for ($repairAttempt = $completedRepairAttempts; $repairAttempt <= 8; $repairAttempt++) {
+    $maxRepairAttempts = 12; // Bounded continuation beyond the previous eight-attempt ceiling.
+    $completedRepairAttempts = max(0, min($maxRepairAttempts, (int)($repairState['completed_attempts'] ?? 0)));
+    for ($repairAttempt = $completedRepairAttempts; $repairAttempt <= $maxRepairAttempts; $repairAttempt++) {
         try {
             $validatedFiles = validate_laravel_project($result['files']);
             break;
         } catch (Throwable $validationError) {
             $validationMessage = $validationError->getMessage();
-            if ($repairAttempt >= 8) {
+            if ($repairAttempt >= $maxRepairAttempts) {
                 respond(422, ['error'=>'Automatic Laravel repair reached its safety limit.','detail'=>$validationMessage,'repairs'=>$repairHistory]);
             }
 
@@ -1318,7 +1319,8 @@ SH;
             $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
             $fileList = implode("\n", array_keys($allGeneratedFiles));
             $context = "";
-            $contextBudget = stripos($validationMessage, 'settings section: theme') !== false ? 0 : 2500; // Theme repair uses focused exact source excerpts below.
+            $isSettingsSectionDiagnostic = preg_match('/settings section:\\s*(telegram|google|payment|theme|shipping|tax)/i', $validationMessage) === 1;
+            $contextBudget = $isSettingsSectionDiagnostic ? 0 : 2500; // Settings repairs receive focused source excerpts below.
             // Put the exact files implicated by the validator first; otherwise the
             // context budget may omit the settings view/controller entirely.
             $priorityContextPaths = [];
@@ -1346,40 +1348,50 @@ SH;
                 if (strlen($context) + strlen($entry) > $contextBudget) break;
                 $context .= $entry;
             }
-            // For the known theme-settings diagnostic, supply exact source anchors
-            // from the complete generated files. The generic excerpt above may omit
-            // the middle of a controller or route file, causing safe patch rejection.
+            // Supply exact source anchors for every configurable settings section.
             $repairTargetContext = "";
-            if (stripos($validationMessage, 'settings section: theme') !== false) {
+            if ($isSettingsSectionDiagnostic) {
                 $viewPath = 'resources/views/admin/settings/index.blade.php';
                 $controllerPath = 'app/Http/Controllers/Admin/SettingsController.php';
                 $routesPath = 'routes/web.php';
                 if (isset($allGeneratedFiles[$viewPath])) {
-                    $repairTargetContext .= "\n\n===== COMPLETE ".$viewPath." (exact patch source) =====\n".$allGeneratedFiles[$viewPath];
+                    $repairTargetContext .= "\n\n===== COMPLETE ".$viewPath." =====\n".$allGeneratedFiles[$viewPath];
                 }
                 if (isset($allGeneratedFiles[$controllerPath])) {
                     $controllerSource = $allGeneratedFiles[$controllerPath];
-                    $helperMarker = '// ---------- Helper methods for status determination ----------';
-                    $helperPosition = strpos($controllerSource, $helperMarker);
-                    $controllerExcerpt = $helperPosition !== false
-                        ? substr($controllerSource, max(0, $helperPosition - 250), 1400)
-                        : substr($controllerSource, -1400);
-                    $repairTargetContext .= "\n\n===== ".$controllerPath." (exact class-tail patch source) =====\n".$controllerExcerpt;
+                    $paymentPosition = strpos($controllerSource, '// ---------- Payment Settings ----------');
+                    $helperPosition = strpos($controllerSource, '// ---------- Helper methods for status determination ----------');
+                    if ($paymentPosition !== false && $helperPosition !== false && $helperPosition > $paymentPosition) {
+                        $controllerExcerpt = substr($controllerSource, 0, min(700, $paymentPosition))
+                            ."\n... settings methods and class structure ...\n"
+                            .substr($controllerSource, $paymentPosition, $helperPosition - $paymentPosition)
+                            ."\n... status helpers ...\n"
+                            .substr($controllerSource, $helperPosition, 700);
+                    } else {
+                        $controllerExcerpt = $controllerSource;
+                    }
+                    $repairTargetContext .= "\n\n===== ".$controllerPath." =====\n".$controllerExcerpt;
                 }
                 if (isset($allGeneratedFiles[$routesPath])) {
                     $routesSource = $allGeneratedFiles[$routesPath];
                     $routePosition = strpos($routesSource, "Route::get('/settings/general'");
-                    $routesExcerpt = $routePosition !== false
-                        ? substr($routesSource, max(0, $routePosition - 150), 1000)
-                        : substr($routesSource, -1000);
-                    $repairTargetContext .= "\n\n===== ".$routesPath." (exact settings-routes patch source) =====\n".$routesExcerpt;
+                    $aiPosition = strpos($routesSource, "Route::post('/ai/generate-description'");
+                    $routesExcerpt = ($routePosition !== false && $aiPosition !== false && $aiPosition > $routePosition)
+                        ? substr($routesSource, max(0, $routePosition - 150), $aiPosition - $routePosition + 250)
+                        : substr($routesSource, -2200);
+                    $repairTargetContext .= "\n\n===== ".$routesPath." =====\n".$routesExcerpt;
+                }
+                foreach (['database/migrations/2025_01_01_000012_create_settings_table.php','app/Models/Setting.php','resources/views/admin/settings/shipping.blade.php','resources/views/admin/settings/taxes.blade.php'] as $extraPath) {
+                    if (isset($allGeneratedFiles[$extraPath])) {
+                        $repairTargetContext .= "\n\n===== ".$extraPath." =====\n".$allGeneratedFiles[$extraPath];
+                    }
                 }
             }
             $repairHistory[] = ['attempt'=>$repairAttempt+1,'error'=>substr($validationMessage,0,500)];
             progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
                 'stage'=>'auto_repair','percent'=>80,'files_created'=>count($allGeneratedFiles),
                 'repair_attempt'=>$repairAttempt+1,'repair_completed_attempts'=>$completedRepairAttempts,
-                'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/8)']);
+                'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/'.$maxRepairAttempts.')']);
 
             $repairPrompt = $system.
                 "\n\nAUTONOMOUS PROJECT REPAIR TASK.".
@@ -1387,22 +1399,22 @@ SH;
                 "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
                 "\nRelevant project file paths:\n".implode("\n", array_slice(array_keys($allGeneratedFiles), 0, 35)).
                 "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet\",\"replace\":\"replacement snippet\"}]}.".
-                "\nReturn 1 to 3 minimal patches only. Each find value must match exactly once in the current file; each replace value must preserve surrounding functionality and make the smallest necessary change. Never return a whole file.".
+                "\nReturn 1 to 5 minimal patches only. Each find value must match exactly once in the current file; each replace value must preserve surrounding functionality and make the smallest necessary change. Never return a whole file.".
                 "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
                 "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
                 "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
                 "\nFor content validation errors, fix the actual implementation rather than inserting placeholder text or bypassing validation.".
-                "\nIf the diagnostic names the Owner Admin Panel theme settings section, make minimal patches to the existing settings Blade view and controller only where needed. Add a real configurable theme section with a CSRF-protected form, existing route/action names, validated theme fields, persistence through existing settings storage/model, and values loaded back into the form. Preserve Telegram, Google, payment, shipping and tax settings. Do not replace whole files.".
+                "\nFor ANY Owner Admin Panel settings-section diagnostic (telegram, google, payment, theme, shipping or tax), repair the complete settings navigation, controller methods, and routes as needed. Every section must be a real owner-admin-only, CSRF-protected form with validation, persistence through the existing Setting model/schema, and saved values loaded back into the form. Fix malformed method/class braces rather than adding nested methods. Shipping must persist base_rate and per_km_rate; tax must persist tax_rate. Preserve existing Telegram, Google OAuth, payment, theme and general settings, including encryption and blank-secret preservation. Add or correct the settings group column migration only if required by the existing model/controller. Do not remove unrelated settings or replace whole files.".
                 "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
                 "\nUSER REQUEST:\n".$prompt.
                 "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context.$repairTargetContext;
 
             try {
-                $repairResult = ai_request_json($repairPrompt, 1800);
+                $repairResult = ai_request_json($repairPrompt, 3000);
                 $repairData = json_decode($repairResult['text'], true);
                 if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
-                    || count($repairData['patches']) < 1 || count($repairData['patches']) > 3) {
-                    throw new RuntimeException('AI repair must return between 1 and 3 minimal patches.');
+                    || count($repairData['patches']) < 1 || count($repairData['patches']) > 5) {
+                    throw new RuntimeException('AI repair must return between 1 and 5 minimal patches.');
                 }
                 $patchedFiles = [];
                 foreach ($repairData['patches'] as $patch) {
