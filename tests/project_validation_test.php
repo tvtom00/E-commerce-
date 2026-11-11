@@ -38,6 +38,10 @@ $broken['routes/web.php']='<?php use App\\Http\\Controllers\\StoreController; Ro
 expect_project_failure($broken,'Route method missing()');
 
 $broken=$valid;
+$broken['app/Http/Controllers/StoreController.php']='<?php namespace App\\Http\\Controllers; use App\\Http\\Controllers\\Controller; class StoreController extends Controller { public function index($request) { return DB::transaction(function () { return $request->user(); }); } }';
+expect_project_failure($broken,'uncaptured variable $request');
+
+$broken=$valid;
 $broken['app/Http/Controllers/StoreController.php']='<?php namespace App\\Http\\Controllers; use App\\Http\\Controllers\\Controller; class StoreController extends Controller { public function index() { return view("store.missing"); } }';
 expect_project_failure($broken,'Referenced Blade view is missing');
 
