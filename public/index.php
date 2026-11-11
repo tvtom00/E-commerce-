@@ -1562,11 +1562,12 @@ SH;
                         if ($anchorCount !== 1) {
                             // One bounded rebase attempt: ask the model to quote an exact,
                             // unique snippet from the current file rather than guessing offsets.
-                            $rebasePrompt = "Return JSON only in this shape: {\\"find\\":\\"exact unique substring copied verbatim from CURRENT FILE\\",\\"replace\\":\\"replacement for that substring\\"}. ".
+                            $rebasePrompt = "Return JSON only with two string fields named find and replace. ".
+                                "The find value must be an exact unique substring copied verbatim from CURRENT FILE; replace is its replacement. ".
                                 "The previous patch anchor failed (match count: ".$anchorCount."). ".
                                 "Do not create a file, do not return a full-file replacement, and do not change unrelated code. ".
                                 "Choose the smallest exact unique snippet from CURRENT FILE that implements the requested change. ".
-                                "If no safe unique snippet exists, return {\\"find\\":\\"\\",\\"replace\\":\\"\\\"}.".
+                                "If no safe unique snippet exists, return both fields as empty strings.".
                                 "\\nTARGET PATH: ".$actualPath.
                                 "\\nREPAIR DIAGNOSTIC: ".$validationMessage.
                                 "\\nREQUESTED CHANGE: ".$patch['replace'].
