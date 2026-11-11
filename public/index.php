@@ -1395,7 +1395,7 @@ SH;
                 "\nIf the diagnostic names the Owner Admin Panel theme settings section, make minimal patches to the existing settings Blade view and controller only where needed. Add a real configurable theme section with a CSRF-protected form, existing route/action names, validated theme fields, persistence through existing settings storage/model, and values loaded back into the form. Preserve Telegram, Google, payment, shipping and tax settings. Do not replace whole files.".
                 "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
                 "\nUSER REQUEST:\n".$prompt.
-                "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context.$repairTargetContext.
+                "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context.$repairTargetContext;
 
             try {
                 $repairResult = ai_request_json($repairPrompt, 1800);
