@@ -1324,12 +1324,13 @@ SH;
             // Put the exact files implicated by the validator first; otherwise the
             // context budget may omit the settings view/controller entirely.
             $priorityContextPaths = [];
-            if (stripos($validationMessage, 'settings section: theme') !== false) {
+            if ($isSettingsSectionDiagnostic) {
                 $priorityContextPaths = [
                     'resources/views/admin/settings/index.blade.php',
                     'app/Http/Controllers/Admin/SettingsController.php',
                     'routes/web.php',
-                    'resources/views/layouts/admin.blade.php',
+                    'app/Models/Setting.php',
+                    'database/migrations/2025_01_01_000012_create_settings_table.php',
                 ];
             }
             $contextOrder = [];
@@ -1358,30 +1359,19 @@ SH;
                     $repairTargetContext .= "\n\n===== COMPLETE ".$viewPath." =====\n".$allGeneratedFiles[$viewPath];
                 }
                 if (isset($allGeneratedFiles[$controllerPath])) {
-                    $controllerSource = $allGeneratedFiles[$controllerPath];
-                    $paymentPosition = strpos($controllerSource, '// ---------- Payment Settings ----------');
-                    $helperPosition = strpos($controllerSource, '// ---------- Helper methods for status determination ----------');
-                    if ($paymentPosition !== false && $helperPosition !== false && $helperPosition > $paymentPosition) {
-                        $controllerExcerpt = substr($controllerSource, 0, min(700, $paymentPosition))
-                            ."\n... settings methods and class structure ...\n"
-                            .substr($controllerSource, $paymentPosition, $helperPosition - $paymentPosition)
-                            ."\n... status helpers ...\n"
-                            .substr($controllerSource, $helperPosition, 700);
-                    } else {
-                        $controllerExcerpt = $controllerSource;
-                    }
-                    $repairTargetContext .= "\n\n===== ".$controllerPath." =====\n".$controllerExcerpt;
+                    // The complete controller is required to repair malformed method
+                    // nesting/braces; excerpts can hide the actual class boundary.
+                    $repairTargetContext .= "\n\n===== COMPLETE ".$controllerPath." =====\n".$allGeneratedFiles[$controllerPath];
                 }
                 if (isset($allGeneratedFiles[$routesPath])) {
-                    $routesSource = $allGeneratedFiles[$routesPath];
-                    $routePosition = strpos($routesSource, "Route::get('/settings/general'");
-                    $aiPosition = strpos($routesSource, "Route::post('/ai/generate-description'");
-                    $routesExcerpt = ($routePosition !== false && $aiPosition !== false && $aiPosition > $routePosition)
-                        ? substr($routesSource, max(0, $routePosition - 150), $aiPosition - $routePosition + 250)
-                        : substr($routesSource, -2200);
-                    $repairTargetContext .= "\n\n===== ".$routesPath." =====\n".$routesExcerpt;
+                    $repairTargetContext .= "\n\n===== COMPLETE ".$routesPath." =====\n".$allGeneratedFiles[$routesPath];
                 }
-                foreach (['database/migrations/2025_01_01_000012_create_settings_table.php','app/Models/Setting.php','resources/views/admin/settings/shipping.blade.php','resources/views/admin/settings/taxes.blade.php'] as $extraPath) {
+                foreach ($allGeneratedFiles as $settingsPath=>$settingsSource) {
+                    if (str_starts_with($settingsPath, 'resources/views/admin/settings/')) {
+                        $repairTargetContext .= "\n\n===== COMPLETE ".$settingsPath." =====\n".$settingsSource;
+                    }
+                }
+                foreach (['database/migrations/2025_01_01_000012_create_settings_table.php','app/Models/Setting.php','resources/views/admin/layout.blade.php','resources/views/layouts/admin.blade.php'] as $extraPath) {
                     if (isset($allGeneratedFiles[$extraPath])) {
                         $repairTargetContext .= "\n\n===== ".$extraPath." =====\n".$allGeneratedFiles[$extraPath];
                     }
@@ -1398,13 +1388,13 @@ SH;
                 "\nThe complete Laravel project already exists. The validator failed with this exact diagnostic: ".$validationMessage.
                 "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
                 "\nRelevant project file paths:\n".implode("\n", array_slice(array_keys($allGeneratedFiles), 0, 35)).
-                "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet\",\"replace\":\"replacement snippet\"}]}.".
-                "\nReturn 1 to 5 minimal patches only. Each find value must match exactly once in the current file; each replace value must preserve surrounding functionality and make the smallest necessary change. Never return a whole file.".
+                "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty string for a new file\",\"replace\":\"replacement snippet or complete new file content\"}]}.".
+                "\nReturn 1 to 8 minimal patches only. For an existing path, find must be non-empty and match exactly once. For a new path, find must be the empty string and replace must contain the complete new file. Never replace an existing file wholesale.".
                 "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
                 "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
                 "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
                 "\nFor content validation errors, fix the actual implementation rather than inserting placeholder text or bypassing validation.".
-                "\nFor ANY Owner Admin Panel settings-section diagnostic (telegram, google, payment, theme, shipping or tax), repair the complete settings navigation, controller methods, and routes as needed. Every section must be a real owner-admin-only, CSRF-protected form with validation, persistence through the existing Setting model/schema, and saved values loaded back into the form. Fix malformed method/class braces rather than adding nested methods. Shipping must persist base_rate and per_km_rate; tax must persist tax_rate. Preserve existing Telegram, Google OAuth, payment, theme and general settings, including encryption and blank-secret preservation. Add or correct the settings group column migration only if required by the existing model/controller. Do not remove unrelated settings or replace whole files.".
+                "\nFor ANY Owner Admin Panel settings-section diagnostic (telegram, google, payment, theme, shipping or tax), repair the complete settings navigation, controller methods, routes, and Blade views as needed. Inspect every supplied settings file before deciding what is missing. Reuse an existing view when suitable; create a missing view with a new-file patch when necessary. Every section must be a real owner-admin-only, CSRF-protected form with validation, persistence through the existing Setting model/schema, and saved values loaded back into the form. Fix malformed method/class braces rather than adding nested methods. Shipping must persist base_rate and per_km_rate; tax must persist tax_rate. Ensure route names, controller return view names, navigation links, and actual view paths agree. Preserve existing Telegram, Google OAuth, payment, theme and general settings, including encryption and blank-secret preservation. Do not remove unrelated settings or replace existing files wholesale.".
                 "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
                 "\nUSER REQUEST:\n".$prompt.
                 "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context.$repairTargetContext;
@@ -1413,25 +1403,32 @@ SH;
                 $repairResult = ai_request_json($repairPrompt, 3000);
                 $repairData = json_decode($repairResult['text'], true);
                 if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
-                    || count($repairData['patches']) < 1 || count($repairData['patches']) > 5) {
-                    throw new RuntimeException('AI repair must return between 1 and 5 minimal patches.');
+                    || count($repairData['patches']) < 1 || count($repairData['patches']) > 8) {
+                    throw new RuntimeException('AI repair must return between 1 and 8 minimal patches.');
                 }
                 $patchedFiles = [];
                 foreach ($repairData['patches'] as $patch) {
                     if (!is_array($patch) || !isset($patch['path'],$patch['find'],$patch['replace'])
                         || !is_string($patch['path']) || !is_string($patch['find']) || !is_string($patch['replace'])
-                        || trim($patch['find']) === '' || trim($patch['replace']) === '') {
+                        || trim($patch['replace']) === '') {
                         throw new RuntimeException('AI repair returned an invalid patch record.');
                     }
                     $patchPath = clean_name($patch['path']);
-                    if (!isset($allGeneratedFiles[$patchPath])) {
-                        throw new RuntimeException('AI repair patch targeted a file that does not exist.');
+                    if (isset($allGeneratedFiles[$patchPath])) {
+                        if (trim($patch['find']) === '') {
+                            throw new RuntimeException('AI repair cannot overwrite an existing file with a create-file patch.');
+                        }
+                        $currentContent = $allGeneratedFiles[$patchPath];
+                        if (substr_count($currentContent, $patch['find']) !== 1) {
+                            throw new RuntimeException('AI repair patch anchor did not match exactly once in '.$patchPath.'; no files were changed.');
+                        }
+                        $patchedFiles[$patchPath] = str_replace($patch['find'], $patch['replace'], $currentContent);
+                    } else {
+                        if ($patch['find'] !== '') {
+                            throw new RuntimeException('AI repair can create a new file only with an empty find value.');
+                        }
+                        $patchedFiles[$patchPath] = $patch['replace'];
                     }
-                    $currentContent = $allGeneratedFiles[$patchPath];
-                    if (substr_count($currentContent, $patch['find']) !== 1) {
-                        throw new RuntimeException('AI repair patch anchor did not match exactly once in '.$patchPath.'; no files were changed.');
-                    }
-                    $patchedFiles[$patchPath] = str_replace($patch['find'], $patch['replace'], $currentContent);
                 }
                 $repairData = ['files'=>[]];
                 foreach ($patchedFiles as $patchPath=>$patchedContent) {
