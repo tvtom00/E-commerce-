@@ -1318,7 +1318,7 @@ SH;
             $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
             $fileList = implode("\n", array_keys($allGeneratedFiles));
             $context = "";
-            $contextBudget = 10000; // Keep repair input bounded for smaller AI providers.
+            $contextBudget = 5000; // Keep repair input small enough for providers with tight TPM limits.
             // Put the exact files implicated by the validator first; otherwise the
             // context budget may omit the settings view/controller entirely.
             $priorityContextPaths = [];
@@ -1339,7 +1339,7 @@ SH;
             }
             foreach ($contextOrder as $contextPath=>$contextContent) {
                 if (in_array($contextPath, $protectedPaths, true)) continue;
-                $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 1800);
+                $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 1200);
                 if (strlen($context) + strlen($entry) > $contextBudget) break;
                 $context .= $entry;
             }
@@ -1355,7 +1355,7 @@ SH;
                 "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
                 "\nExisting project file paths:\n".$fileList.
                 "\nReturn JSON only: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file content\"}]}.".
-                "\nReturn 1 to 8 complete text files. You may create missing files or replace faulty existing files, but do not return unchanged files.".
+                "\nReturn 1 to 4 complete text files. Prioritize the exact files needed to fix the validator diagnostic. You may create missing files or replace faulty existing files, but do not return unchanged files.".
                 "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
                 "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
                 "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
@@ -1366,11 +1366,11 @@ SH;
                 "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context;
 
             try {
-                $repairResult = ai_request_json($repairPrompt, 7000);
+                $repairResult = ai_request_json($repairPrompt, 3500);
                 $repairData = json_decode($repairResult['text'], true);
                 if (!is_array($repairData) || !isset($repairData['files']) || !is_array($repairData['files'])
-                    || count($repairData['files']) < 1 || count($repairData['files']) > 8) {
-                    throw new RuntimeException('AI repair must return between 1 and 8 files.');
+                    || count($repairData['files']) < 1 || count($repairData['files']) > 4) {
+                    throw new RuntimeException('AI repair must return between 1 and 4 files.');
                 }
                 $changedFiles = [];
                 foreach ($repairData['files'] as $repairFile) {
