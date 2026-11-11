@@ -453,6 +453,30 @@ function build_project_scan_report(array $files, string $diagnostic): string {
     return strlen($report) > 11500 ? substr($report, 0, 11500)."\n[scan report compacted; all files were still inspected]" : $report;
 }
 
+function split_repair_payload_batches(string $text, int $maxChars = 4200): array {
+    $text = trim($text);
+    if ($text === '') return ['(no additional context)'];
+    $lines = preg_split('/(?<=\\n)/', $text);
+    $batches = [];
+    $current = '';
+    foreach ($lines as $line) {
+        if (strlen($line) > $maxChars) {
+            if ($current !== '') { $batches[] = $current; $current = ''; }
+            for ($offset = 0; $offset < strlen($line); $offset += $maxChars) {
+                $batches[] = substr($line, $offset, $maxChars);
+            }
+            continue;
+        }
+        if ($current !== '' && strlen($current) + strlen($line) > $maxChars) {
+            $batches[] = $current;
+            $current = '';
+        }
+        $current .= $line;
+    }
+    if ($current !== '') $batches[] = $current;
+    return $batches ?: ['(no additional context)'];
+}
+
 function build_repair_source_context(array $files, string $diagnostic, int $maxBytes = 7000): string {
     // Rank every file by path and content relevance, then include only the strongest
     // complete source anchors. This keeps provider requests within small TPM limits.
@@ -1361,210 +1385,44 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             $contractContext;
         $compactNote='';
         for($batchTry=1;;$batchTry++) {
-            try {
-                $outputTokens=max(3000,min(8000,(int)envv('NIRA_BATCH_OUTPUT_TOKENS','6000')));
-                $aiResult=ai_request_json($batchText.$compactNote,$outputTokens);
-                break;
-            } catch(AiOutputLimitException|AiJsonFormatException $e) {
-                if($batchTry>=2) respond(502,['error'=>'AI output/JSON limit reached in '.$batch['name'].' batch, even in compact mode.','detail'=>$e->getMessage()]);
-                $compactNote="\nCOMPACT MODE: the previous response exceeded the output or JSON-format limit. Return every required file in this batch, but use concise production-ready code, no comments or sample text, minimal markup, and valid complete JSON.";
-                progress_event('progress',['resume_id'=>$resumeId,'stage'=>$batch['name'].'_compact_retry','batch'=>$batchIndex+1,
-                    'total_batches'=>$batchTotal,'message'=>'আউটপুট/JSON সীমা হয়েছে, ছোট করে আবার চেষ্টা হচ্ছে']);
-            } catch(Throwable $e) {
-                respond(502,['error'=>'AI generation failed during '.$batch['name'].' batch.','detail'=>$e->getMessage()]);
-            }
-        }
-        $batchNewFiles = [];
-        $batchTextOutput = $aiResult['text'];
-        $finishReason = (string)($aiResult['finish_reason'] ?? '');
-        if (in_array($finishReason, ['MAX_TOKENS','length'], true)) {
-            respond(502, ['error'=>'AI output limit reached in '.$batch['name'].' batch. Reduce the requested scope and retry; no partial ZIP was published.']);
-        }
-        $batchResult = json_decode($batchTextOutput, true);
-        if (!is_array($batchResult) || !isset($batchResult['files']) || !is_array($batchResult['files'])) {
-            respond(502, ['error'=>'AI returned invalid JSON for '.$batch['name'].' batch. No partial project was published.']);
-        }
-        foreach ($batchResult['files'] as $generatedFile) {
-            if (!is_array($generatedFile) || !isset($generatedFile['path'],$generatedFile['content'])
-                || !is_string($generatedFile['path']) || !is_string($generatedFile['content'])) {
-                respond(502, ['error'=>'AI returned a malformed file in '.$batch['name'].' batch.']);
-            }
-            $generatedPath = clean_name($generatedFile['path']);
-            $pathAllowed = false;
-            foreach ($batch['paths'] as $allowedPattern) {
-                if (fnmatch($allowedPattern, $generatedPath)) { $pathAllowed = true; break; }
-            }
-            if (!$pathAllowed) respond(502, ['error'=>'AI generated a file outside the '.$batch['name'].' batch scope: '.$generatedPath]);
-            if (isset($allGeneratedFiles[$generatedPath])) {
-                respond(502, ['error'=>'AI generated a duplicate path across batches: '.$generatedPath]);
-            }
-            $allGeneratedFiles[$generatedPath] = $generatedFile['content'];
-            $batchNewFiles[$generatedPath] = $generatedFile['content'];
-            if (count($allGeneratedFiles) > MAX_OUTPUT_FILES) {
-                respond(422, ['error'=>'Generated project exceeds the 2000-file safety limit.']);
-            }
-        }
-        if (count($batchResult['files']) < 1) {
-            respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
-        }
-        try {
-            if($checkpoint!==null) {
-                $fileShas=checkpoint_save_github($checkpoint,$batchNewFiles,$fileShas,$batchIndex,$previewId,$promptHash,$name?:'website',$githubToken,$repairState);
-            } else {
-                checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex,$previewId,$promptHash,$name?:'website',$repairState);
-            }
-        } catch(Throwable $e) {
-            error_log('[NIRA_BUILDER_CHECKPOINT] batch='.$batch['name'].' error='.substr(preg_replace('/\s+/',' ',$e->getMessage()),0,500));
-            respond(502,['error'=>'Could not save the completed batch checkpoint.','detail'=>$e->getMessage()]);
-        }
-        save_preview_snapshot($previewId,$allGeneratedFiles);
-        progress_event('progress',['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,'stage'=>$batch['name'].'_complete',
-            'batch'=>$batchIndex+1,'total_batches'=>$batchTotal,'percent'=>generation_progress_percent($batchIndex+1),
-            'files_created'=>count($allGeneratedFiles),'message'=>$batch['name'].' সম্পন্ন','preview_id'=>$previewId,
-            'preview_url'=>'/preview?id='.$previewId.'&view=storefront',
-            'preview'=>['storefront_html'=>build_static_preview($allGeneratedFiles,'resources/views/store/index.blade.php'),
-                'admin_html'=>build_static_preview($allGeneratedFiles,'resources/views/admin/dashboard.blade.php')]]);
-    }
-    $result = ['files'=>[]];
-    foreach ($allGeneratedFiles as $generatedPath=>$generatedContent) {
-        $result['files'][] = ['path'=>$generatedPath,'content'=>$generatedContent];
-    }
-    if (!is_array($result) || !isset($result['files']) || !is_array($result['files'])) respond(502, ['error'=>'AI returned an invalid project format.']);
-    if (count($result['files']) < 1 || count($result['files']) > MAX_OUTPUT_FILES) respond(502, ['error'=>'Generated project file count is outside the allowed limit after deployment files are added.']);
-    // Replace model-authored deployment plumbing with a deterministic runtime.
-    // Missing buyer database credentials must not prevent Apache from starting.
-    $dockerContent = <<<'DOCKER'
-FROM php:8.3-apache
-RUN apt-get update && apt-get install -y --no-install-recommends git unzip libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev libicu-dev \
-    && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j"$(nproc)" pdo_mysql pdo_pgsql mbstring bcmath exif gd zip intl opcache \
-    && a2enmod rewrite headers \
-    && sed -ri 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-available/000-default.conf \
-    && sed -ri 's/Listen 80/Listen 10000/' /etc/apache2/ports.conf \
-    && sed -ri 's/:80>/:10000>/' /etc/apache2/sites-available/000-default.conf \
-    && sed -ri '/<Directory/,/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/apache2/sites-available/000-default.conf \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
-WORKDIR /var/www/html
-COPY . .
-COPY docker/entrypoint.sh /usr/local/bin/nira-entrypoint
-RUN composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader \
-    && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache database \
-    && chmod +x /usr/local/bin/nira-entrypoint \
-    && chown -R www-data:www-data storage bootstrap/cache database
-ENV APP_ENV=production APP_DEBUG=false DB_CONNECTION=mysql
-EXPOSE 10000
-CMD ["/usr/local/bin/nira-entrypoint"]
-DOCKER;
-    $entrypointContent = <<<'SH'
-#!/bin/sh
-set -eu
-cd /var/www/html
-if [ ! -f artisan ]; then
-    echo "Laravel artisan file is missing; refusing to start an incomplete project." >&2
-    exit 1
-fi
-if [ -n "${DB_URL:-}" ] || [ -n "${DATABASE_URL:-}" ] || [ -n "${DB_HOST:-}" ]; then
-    echo "Database configuration detected; applying Laravel migrations."
-    php artisan migrate --force
-else
-    echo "Database credentials are not configured yet; skipping migrations and starting the app."
-fi
-exec apache2-foreground
-SH;
-    $runtimeFiles = [];
-    foreach ($result['files'] as $generatedFile) {
-        if (!is_array($generatedFile) || !isset($generatedFile['path'])) continue;
-        if (in_array($generatedFile['path'], ['Dockerfile','docker/entrypoint.sh'], true)) continue;
-        $runtimeFiles[] = $generatedFile;
-    }
-    $runtimeFiles[] = ['path'=>'Dockerfile','content'=>$dockerContent];
-    $runtimeFiles[] = ['path'=>'docker/entrypoint.sh','content'=>$entrypointContent];
-    $result['files'] = $runtimeFiles;
-    progress_event('progress', ['stage'=>'validation','percent'=>80,'files_created'=>count($result['files']),'message'=>'প্রজেক্টের ফাইল ও নিরাপত্তা যাচাই হচ্ছে']);
-
-    // If the batches completed but omitted a required file, repair only that
-    // exact path from the saved project context. Never restart completed batches.
-    $validatedFiles = null;
-    $repairHistory = [];
-    $maxRepairAttempts = 18; // Preserve prior work while allowing a few bounded targeted repairs.
-    $completedRepairAttempts = max(0, min($maxRepairAttempts, (int)($repairState['completed_attempts'] ?? 0)));
-    for ($repairAttempt = $completedRepairAttempts; $repairAttempt <= $maxRepairAttempts; $repairAttempt++) {
-        try {
-            $validatedFiles = validate_laravel_project($result['files']);
-            break;
-        } catch (Throwable $validationError) {
-            $validationMessage = $validationError->getMessage();
-            if ($repairAttempt >= $maxRepairAttempts) {
-                respond(422, ['error'=>'Automatic Laravel repair reached its safety limit.','detail'=>$validationMessage,'repairs'=>$repairHistory]);
-            }
-
-            // General self-repair: let the validator describe the actual defect,
-            // then let the model repair every related file in one bounded pass.
-            // Runtime/security-owned files are never editable by this repair loop.
-            // Search the entire project locally, but send only bounded relevant source.
-            $context = "";
-            $repairTargetContext = build_repair_source_context($allGeneratedFiles, $validationMessage, 5000);
-            $isSettingsSectionDiagnostic = preg_match('/settings section:\\s*(telegram|google|payment|theme|shipping|tax)/i', $validationMessage) === 1;
-            $isOrderPolicyDiagnostic = stripos($validationMessage, 'app/Policies/OrderPolicy.php') !== false;
-            if ($isOrderPolicyDiagnostic) {
-                // Always include the existing policy plus its authorization dependencies.
-                $priorityOrderPolicy = [
-                    'app/Policies/OrderPolicy.php',
-                    'app/Models/Order.php',
-                    'app/Models/User.php',
-                    'app/Http/Controllers/Admin/OrderController.php',
-                    'app/Http/Middleware/EnsureRole.php',
-                    'routes/web.php',
-                ];
-                foreach ($priorityOrderPolicy as $priorityPath) {
-                    if (!isset($allGeneratedFiles[$priorityPath]) || str_contains($repairTargetContext, '===== EXISTING SOURCE: '.$priorityPath.' ') || str_contains($repairTargetContext, '===== PRIORITY EXISTING SOURCE: '.$priorityPath.' ')) continue;
-                    $remaining = max(0, 9000 - strlen($repairTargetContext));
-                    if ($remaining < 500) break;
-                    $source = (string)$allGeneratedFiles[$priorityPath];
-                    $source = strlen($source) > $remaining - 100 ? substr($source, 0, max(0, $remaining - 100)) : $source;
-                    $repairTargetContext .= "\n\n===== PRIORITY EXISTING SOURCE: ".$priorityPath." =====\n".$source;
-                }
-            }
-            if ($isSettingsSectionDiagnostic) {
-                $prioritySettings = [
-                    'resources/views/admin/settings/index.blade.php',
-                    'app/Http/Controllers/Admin/SettingsController.php',
-                    'routes/web.php',
-                    'app/Models/Setting.php',
-                    'database/migrations/2025_01_01_000012_create_settings_table.php',
-                ];
-                foreach ($prioritySettings as $priorityPath) {
-                    if (!isset($allGeneratedFiles[$priorityPath]) || str_contains($repairTargetContext, '===== EXISTING SOURCE: '.$priorityPath.' ')) continue;
-                    $remaining = max(0, 9000 - strlen($repairTargetContext));
-                    if ($remaining < 500) break;
-                    $source = (string)$allGeneratedFiles[$priorityPath];
-                    $source = strlen($source) > $remaining - 100 ? substr($source, 0, max(0, $remaining - 100)) : $source;
-                    $repairTargetContext .= "\n\n===== PRIORITY EXISTING SOURCE: ".$priorityPath." =====\n".$source;
-                }
-            }
-            if (strlen($repairTargetContext) > 9000) $repairTargetContext = substr($repairTargetContext, 0, 9000);
-            $repairHistory[] = ['attempt'=>$repairAttempt+1,'error'=>substr($validationMessage,0,500)];
-            progress_event('progress', ['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,
-                'stage'=>'auto_repair','percent'=>80,'files_created'=>count($allGeneratedFiles),
-                'repair_attempt'=>$repairAttempt+1,'repair_completed_attempts'=>$completedRepairAttempts,
-                'message'=>'Laravel-এর সব Validation সমস্যা একসাথে বিশ্লেষণ করে প্রয়োজনীয় ফাইল স্বয়ংক্রিয়ভাবে ঠিক করা হচ্ছে (ধাপ '.($repairAttempt+1).'/'.$maxRepairAttempts.')']);
-
-            $repairPrompt =
-                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
-                "The full saved project was scanned locally. Use the supplied complete path index and ranked matches to locate existing files before deciding anything is missing. Never create a duplicate if a case-insensitive path, basename, class, view, route or equivalent implementation exists. ".
-                "Repair only the diagnosed root cause and directly related wiring. Return 1 to 8 minimal patches. Existing files require a non-empty exact snippet occurring once; new files require empty find and proof no equivalent exists. Never replace an existing file wholesale. ".
+            $scanReport = build_project_scan_report($allGeneratedFiles, $validationMessage);
+            $sourceBatches = split_repair_payload_batches($repairTargetContext, 4200);
+            $scanBatches = split_repair_payload_batches($scanReport, 4200);
+            $batchCount = max(count($sourceBatches), count($scanBatches));
+            $combinedPatches = [];
+            $repairBaseInstructions =
+                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\\"patches\\":[{\\"path\\":\\"relative/path\\",\\"find\\":\\"exact existing snippet or empty for new file\\",\\"replace\\":\\"replacement snippet or complete new file\\"}]}. ".
+                "This is context batch {BATCH_NO} of {BATCH_TOTAL}. Analyze only this batch and return minimal patches only when this batch contains sufficient exact evidence. If it lacks enough evidence, return {\\"patches\\":[]} rather than guessing. Never invent file paths or duplicate existing files. ".
+                "Repair only the diagnosed root cause. Existing files require a non-empty exact unique anchor; new files require proof no equivalent exists. Never replace an existing file wholesale. ".
                 ($isOrderPolicyDiagnostic
-                    ? "For OrderPolicy specifically, repair the EXISTING app/Policies/OrderPolicy.php only. Read the provided Order, User, OrderController, EnsureRole and route source first. Implement a real Laravel OrderPolicy with the authorization abilities actually used by the project (at minimum viewAny, view, create, update, delete, restore and forceDelete where applicable), matching existing role names and ownership rules. Do not grant all users access, do not assume admin role names, and do not create another policy file. Ensure the patch uses a unique exact anchor copied from the supplied existing policy. "
+                    ? "For OrderPolicy, match the existing Order/User models, controller, middleware and route authorization rules. Never grant broad access or create a duplicate policy. "
                     : "").
                 "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials.".
-                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 1200).
-                "\n\nPROJECT SCAN AND COMPLETE PATH INDEX:\n".build_project_scan_report($allGeneratedFiles, $validationMessage).
-                "\n\nRELEVANT EXISTING SOURCE FILES (bounded excerpts; confirm exact anchors):".$repairTargetContext;
-
+                "\\nDIAGNOSTIC: ".substr($validationMessage, 0, 900);
             try {
-                $repairResult = ai_request_json($repairPrompt, 1800);
-                $repairData = json_decode($repairResult['text'], true);
+                for ($batchIndex = 0; $batchIndex < $batchCount; $batchIndex++) {
+                    $scanPart = $scanBatches[$batchIndex] ?? '(no more scan index entries)';
+                    $sourcePart = $sourceBatches[$batchIndex] ?? '(no more source excerpts)';
+                    $repairPrompt = str_replace(
+                        ['{BATCH_NO}','{BATCH_TOTAL}'],
+                        [(string)($batchIndex + 1),(string)$batchCount],
+                        $repairBaseInstructions
+                    )."\\n\\nPROJECT PATH/REFERENCE SCAN BATCH:\\n".$scanPart.
+                      "\\n\\nEXISTING SOURCE CONTEXT BATCH:\\n".$sourcePart.
+                      "\\nReturn patches only for exact, relevant existing source shown in this batch. Keep each patch small.";
+                    error_log('[NIRA_BUILDER_AI] repair_batch='.($batchIndex+1).'/'.$batchCount.' prompt_chars='.strlen($repairPrompt).' target_tpm=7500');
+                    $repairResult = ai_request_json($repairPrompt, 700);
+                    $batchData = json_decode($repairResult['text'], true);
+                    if (!is_array($batchData) || !isset($batchData['patches']) || !is_array($batchData['patches'])) {
+                        throw new RuntimeException('AI repair batch '.($batchIndex+1).' returned an invalid patch list.');
+                    }
+                    foreach ($batchData['patches'] as $onePatch) $combinedPatches[] = $onePatch;
+                    if (count($combinedPatches) > 8) throw new RuntimeException('Repair batches produced more than 8 patches; stopped safely without applying them.');
+                    // Stay below a 7,500 TPM rolling budget: calls are sequential
+                    // with a deliberate gap, never dispatched concurrently.
+                    if ($batchIndex + 1 < $batchCount) sleep(25);
+                }
+                $repairData = ['patches'=>$combinedPatches];
                 if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
                     || count($repairData['patches']) < 1 || count($repairData['patches']) > 8) {
                     throw new RuntimeException('AI repair must return between 1 and 8 minimal patches.');
