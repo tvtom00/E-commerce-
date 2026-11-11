@@ -1391,14 +1391,14 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             $batchCount = max(count($sourceBatches), count($scanBatches));
             $combinedPatches = [];
             $repairBaseInstructions =
-                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\\"patches\\":[{\\"path\\":\\"relative/path\\",\\"find\\":\\"exact existing snippet or empty for new file\\",\\"replace\\":\\"replacement snippet or complete new file\\"}]}. ".
-                "This is context batch {BATCH_NO} of {BATCH_TOTAL}. Analyze only this batch and return minimal patches only when this batch contains sufficient exact evidence. If it lacks enough evidence, return {\\"patches\\":[]} rather than guessing. Never invent file paths or duplicate existing files. ".
+                "You are a senior Laravel repository repair engineer. Return ONLY JSON: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet or empty for new file\",\"replace\":\"replacement snippet or complete new file\"}]}. ".
+                "This is context batch {BATCH_NO} of {BATCH_TOTAL}. Analyze only this batch and return minimal patches only when this batch contains sufficient exact evidence. If it lacks enough evidence, return {\"patches\":[]} rather than guessing. Never invent file paths or duplicate existing files. ".
                 "Repair only the diagnosed root cause. Existing files require a non-empty exact unique anchor; new files require proof no equivalent exists. Never replace an existing file wholesale. ".
                 ($isOrderPolicyDiagnostic
                     ? "For OrderPolicy, match the existing Order/User models, controller, middleware and route authorization rules. Never grant broad access or create a duplicate policy. "
                     : "").
                 "Preserve all requested features, authorization, validation, CSRF, payment verification, schema and unrelated code. Do not edit Dockerfile, docker/entrypoint.sh, public/index.php, .env or credentials.".
-                "\\nDIAGNOSTIC: ".substr($validationMessage, 0, 900);
+                "\nDIAGNOSTIC: ".substr($validationMessage, 0, 900);
             try {
                 for ($batchIndex = 0; $batchIndex < $batchCount; $batchIndex++) {
                     $scanPart = $scanBatches[$batchIndex] ?? '(no more scan index entries)';
@@ -1407,9 +1407,9 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                         ['{BATCH_NO}','{BATCH_TOTAL}'],
                         [(string)($batchIndex + 1),(string)$batchCount],
                         $repairBaseInstructions
-                    )."\\n\\nPROJECT PATH/REFERENCE SCAN BATCH:\\n".$scanPart.
-                      "\\n\\nEXISTING SOURCE CONTEXT BATCH:\\n".$sourcePart.
-                      "\\nReturn patches only for exact, relevant existing source shown in this batch. Keep each patch small.";
+                    )."\n\nPROJECT PATH/REFERENCE SCAN BATCH:\n".$scanPart.
+                      "\n\nEXISTING SOURCE CONTEXT BATCH:\n".$sourcePart.
+                      "\nReturn patches only for exact, relevant existing source shown in this batch. Keep each patch small.";
                     error_log('[NIRA_BUILDER_AI] repair_batch='.($batchIndex+1).'/'.$batchCount.' prompt_chars='.strlen($repairPrompt).' target_tpm=7500');
                     $repairResult = ai_request_json($repairPrompt, 700);
                     $batchData = json_decode($repairResult['text'], true);
