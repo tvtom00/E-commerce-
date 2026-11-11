@@ -1318,7 +1318,7 @@ SH;
             $protectedPaths = ['Dockerfile','docker/entrypoint.sh','public/index.php'];
             $fileList = implode("\n", array_keys($allGeneratedFiles));
             $context = "";
-            $contextBudget = 5000; // Keep repair input small enough for providers with tight TPM limits.
+            $contextBudget = 2500; // Keep repair input small enough for providers with tight TPM limits.
             // Put the exact files implicated by the validator first; otherwise the
             // context budget may omit the settings view/controller entirely.
             $priorityContextPaths = [];
@@ -1339,7 +1339,10 @@ SH;
             }
             foreach ($contextOrder as $contextPath=>$contextContent) {
                 if (in_array($contextPath, $protectedPaths, true)) continue;
-                $entry = "\n\n===== ".$contextPath." =====\n".substr($contextContent, 0, 1200);
+                $contextExcerpt = strlen($contextContent) > 900
+                    ? substr($contextContent, 0, 450)."\n... middle omitted ...\n".substr($contextContent, -450)
+                    : $contextContent;
+                $entry = "\n\n===== ".$contextPath." =====\n".$contextExcerpt;
                 if (strlen($context) + strlen($entry) > $contextBudget) break;
                 $context .= $entry;
             }
@@ -1353,24 +1356,45 @@ SH;
                 "\n\nAUTONOMOUS PROJECT REPAIR TASK.".
                 "\nThe complete Laravel project already exists. The validator failed with this exact diagnostic: ".$validationMessage.
                 "\nRepair the root cause and any directly related missing/inconsistent files in ONE response.".
-                "\nExisting project file paths:\n".$fileList.
-                "\nReturn JSON only: {\"files\":[{\"path\":\"relative/path\",\"content\":\"complete file content\"}]}.".
-                "\nReturn 1 to 4 complete text files. Prioritize the exact files needed to fix the validator diagnostic. You may create missing files or replace faulty existing files, but do not return unchanged files.".
+                "\nRelevant project file paths:\n".implode("\n", array_slice(array_keys($allGeneratedFiles), 0, 35)).
+                "\nReturn JSON only: {\"patches\":[{\"path\":\"relative/path\",\"find\":\"exact existing snippet\",\"replace\":\"replacement snippet\"}]}.".
+                "\nReturn 1 to 3 minimal patches only. Each find value must match exactly once in the current file; each replace value must preserve surrounding functionality and make the smallest necessary change. Never return a whole file.".
                 "\nNever return or modify these protected paths: Dockerfile, docker/entrypoint.sh, public/index.php, .env, or any real secret/config credential.".
                 "\nKeep Laravel conventions, MySQL compatibility, existing database schema, models, controllers, routes, UI and user-requested features consistent.".
                 "\nFor migrations, inspect existing migrations/models and create all required missing migrations with safe foreign-key order, indexes, timestamps, correct down() methods, and no duplicate table creation.".
                 "\nFor content validation errors, fix the actual implementation rather than inserting placeholder text or bypassing validation.".
-                "\nIf the diagnostic names the Owner Admin Panel theme settings section, inspect and update BOTH resources/views/admin/settings/index.blade.php and app/Http/Controllers/Admin/SettingsController.php. Add a real configurable theme section with a CSRF-protected form, existing route/action names, validated theme fields, persistence through the existing settings storage/model, and values loaded back into the form. Preserve all existing Telegram, Google, payment, shipping and tax settings and their behavior; do not replace the whole settings page with a reduced version.".
+                "\nIf the diagnostic names the Owner Admin Panel theme settings section, make minimal patches to the existing settings Blade view and controller only where needed. Add a real configurable theme section with a CSRF-protected form, existing route/action names, validated theme fields, persistence through existing settings storage/model, and values loaded back into the form. Preserve Telegram, Google, payment, shipping and tax settings. Do not replace whole files.".
                 "\nDo not delete features, weaken authorization, remove payment verification, disable tests, or bypass security checks.".
                 "\nUSER REQUEST:\n".$prompt.
                 "\n\nCURRENT GENERATED PROJECT CONTEXT (read-only reference):".$context;
 
             try {
-                $repairResult = ai_request_json($repairPrompt, 3500);
+                $repairResult = ai_request_json($repairPrompt, 1800);
                 $repairData = json_decode($repairResult['text'], true);
-                if (!is_array($repairData) || !isset($repairData['files']) || !is_array($repairData['files'])
-                    || count($repairData['files']) < 1 || count($repairData['files']) > 4) {
-                    throw new RuntimeException('AI repair must return between 1 and 4 files.');
+                if (!is_array($repairData) || !isset($repairData['patches']) || !is_array($repairData['patches'])
+                    || count($repairData['patches']) < 1 || count($repairData['patches']) > 3) {
+                    throw new RuntimeException('AI repair must return between 1 and 3 minimal patches.');
+                }
+                $patchedFiles = [];
+                foreach ($repairData['patches'] as $patch) {
+                    if (!is_array($patch) || !isset($patch['path'],$patch['find'],$patch['replace'])
+                        || !is_string($patch['path']) || !is_string($patch['find']) || !is_string($patch['replace'])
+                        || trim($patch['find']) === '' || trim($patch['replace']) === '') {
+                        throw new RuntimeException('AI repair returned an invalid patch record.');
+                    }
+                    $patchPath = clean_name($patch['path']);
+                    if (!isset($allGeneratedFiles[$patchPath])) {
+                        throw new RuntimeException('AI repair patch targeted a file that does not exist.');
+                    }
+                    $currentContent = $allGeneratedFiles[$patchPath];
+                    if (substr_count($currentContent, $patch['find']) !== 1) {
+                        throw new RuntimeException('AI repair patch anchor did not match exactly once; no files were changed.');
+                    }
+                    $patchedFiles[$patchPath] = str_replace($patch['find'], $patch['replace'], $currentContent);
+                }
+                $repairData = ['files'=>[]];
+                foreach ($patchedFiles as $patchPath=>$patchedContent) {
+                    $repairData['files'][] = ['path'=>$patchPath,'content'=>$patchedContent];
                 }
                 $changedFiles = [];
                 foreach ($repairData['files'] as $repairFile) {
