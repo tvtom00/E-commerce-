@@ -303,6 +303,24 @@ function clean_name(string $name): string {
     return $name;
 }
 
+/**
+ * Canonical comparison key for project paths. Preserve the original path for
+ * storage, but compare case-insensitively and normalize separators/dot segments
+ * so a differently-cased spelling cannot create a second copy of one file.
+ */
+function canonical_file_path_key(string $path): string {
+    $path = clean_name($path);
+    $parts = explode('/', str_replace('\\\\', '/', $path));
+    $normalized = [];
+    foreach ($parts as $part) {
+        if ($part === '' || $part === '.') continue;
+        if ($part === '..') throw new RuntimeException('Invalid generated file path.');
+        $normalized[] = strtolower($part);
+    }
+    if (!$normalized) throw new RuntimeException('Invalid generated file path.');
+    return implode('/', $normalized);
+}
+
 function validate_laravel_project(array $rawFiles): array {
     $required = [
         'Dockerfile','docker/entrypoint.sh','composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
@@ -1414,15 +1432,24 @@ SH;
                         throw new RuntimeException('AI repair returned an invalid patch record.');
                     }
                     $patchPath = clean_name($patch['path']);
-                    if (isset($allGeneratedFiles[$patchPath])) {
+                    $patchKey = canonical_file_path_key($patchPath);
+                    $matchingExistingPaths = [];
+                    foreach (array_keys($allGeneratedFiles) as $existingPath) {
+                        if (canonical_file_path_key($existingPath) === $patchKey) $matchingExistingPaths[] = $existingPath;
+                    }
+                    if (count($matchingExistingPaths) > 1) {
+                        throw new RuntimeException('Checkpoint already contains multiple path variants for '.$patchPath.'; repair stopped without changing files.');
+                    }
+                    if (count($matchingExistingPaths) === 1) {
+                        $actualPath = $matchingExistingPaths[0];
                         if (trim($patch['find']) === '') {
-                            throw new RuntimeException('AI repair cannot overwrite an existing file with a create-file patch.');
+                            throw new RuntimeException('AI repair cannot create a duplicate or overwrite an existing path: '.$actualPath);
                         }
-                        $currentContent = $allGeneratedFiles[$patchPath];
+                        $currentContent = $allGeneratedFiles[$actualPath];
                         if (substr_count($currentContent, $patch['find']) !== 1) {
-                            throw new RuntimeException('AI repair patch anchor did not match exactly once in '.$patchPath.'; no files were changed.');
+                            throw new RuntimeException('AI repair patch anchor did not match exactly once in '.$actualPath.'; no files were changed.');
                         }
-                        $patchedFiles[$patchPath] = str_replace($patch['find'], $patch['replace'], $currentContent);
+                        $patchedFiles[$actualPath] = str_replace($patch['find'], $patch['replace'], $currentContent);
                     } else {
                         if ($patch['find'] !== '') {
                             throw new RuntimeException('AI repair can create a new file only with an empty find value.');
@@ -1460,6 +1487,27 @@ SH;
                     $changedFiles[$repairPath] = $repairFile['content'];
                 }
                 if (!$changedFiles) throw new RuntimeException('AI repair returned no usable files.');
+                // Refuse any case/separator/dot-segment alias before mutating the checkpoint.
+                $canonicalExisting = [];
+                foreach (array_keys($allGeneratedFiles) as $existingPath) {
+                    $key = canonical_file_path_key($existingPath);
+                    if (isset($canonicalExisting[$key]) && $canonicalExisting[$key] !== $existingPath) {
+                        throw new RuntimeException('Checkpoint contains duplicate path variants; no repair files were saved.');
+                    }
+                    $canonicalExisting[$key] = $existingPath;
+                }
+                $canonicalChanged = [];
+                foreach (array_keys($changedFiles) as $changedPath) {
+                    $key = canonical_file_path_key($changedPath);
+                    if (isset($canonicalChanged[$key]) && $canonicalChanged[$key] !== $changedPath) {
+                        throw new RuntimeException('AI repair returned duplicate path variants; no files were changed.');
+                    }
+                    $canonicalChanged[$key] = $changedPath;
+                    if (isset($canonicalExisting[$key]) && $canonicalExisting[$key] !== $changedPath
+                        && !isset($allGeneratedFiles[$changedPath])) {
+                        throw new RuntimeException('AI repair attempted to create a duplicate path variant of '.$canonicalExisting[$key].'; no files were changed.');
+                    }
+                }
                 if (count($allGeneratedFiles) + count(array_diff_key($changedFiles,$allGeneratedFiles)) > MAX_OUTPUT_FILES) {
                     throw new RuntimeException('Automatic repair would exceed the project file limit.');
                 }
