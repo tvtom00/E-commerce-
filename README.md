@@ -14,7 +14,7 @@ A lightweight PHP 8.2 + Apache service for generating website project ZIPs from 
 - GEMINI_MODEL: optional; defaults to gemini-3.8-flash, with a Gemini 3.6 Flash fallback.
 - GEMINI_FALLBACK_MODEL: optional; defaults to gemini-3.6-flash.
 - ENABLE_OPENAI_FALLBACK: optional; defaults to false. Set true only if you intentionally want to allow paid OpenAI API usage. Gemini is tried first; Groq is secondary.
-- NIRA_BUILDER_TOKEN: required shared secret. The generation API stays disabled until this is set privately in Render; callers must send it as X-Nira-Token.
+- NIRA_BUILDER_TOKEN: optional shared secret used only for protected existing-draft revision and approval endpoints. Normal website ZIP generation is prompt-only and does not ask the visitor for this token.
 - NIRA_GITHUB_TOKEN: required for durable free project storage. Use a fine-grained GitHub token with permission to create private repositories and read/write repository contents and pull requests. Each validated project is committed to a new private repository on a review branch. The response download URL points to the private repository branch ZIP, which remains available in GitHub after Render restarts.
 - NIRA_STORAGE_PATH: optional local path for temporary ZIP creation. Render Free local files are ephemeral; GitHub private repositories are used as the durable free archive when NIRA_GITHUB_TOKEN is configured.
 
@@ -28,11 +28,11 @@ A lightweight PHP 8.2 + Apache service for generating website project ZIPs from 
 ## API
 POST /api/generate
 Content-Type: application/json
-Optional header: X-Nira-Token
+No Builder token is required for normal generation. The browser must submit from the same website origin; generation is limited to five requests per source IP per hour.
 
 {"name":"my-store","prompt":"Build a responsive ecommerce storefront with product listing, cart, and admin UI..."}
 
-Returns JSON with a download URL. If NIRA_GITHUB_TOKEN is configured, it also creates a private GitHub repository and a review pull request. Generated projects are never executed on this service.
+Returns JSON with a download URL. If NIRA_GITHUB_TOKEN is configured, it also creates a private GitHub repository and a review pull request. NIRA_BUILDER_TOKEN is not required for generation; it remains required for the separate /api/revise and /api/approve advanced draft actions. Generated projects are never executed on this service.
 
 GET /health returns service health.
 
