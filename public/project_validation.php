@@ -222,7 +222,7 @@ function nira_validate_checkpoint_file_map(array $files): void {
         if (($base === '.env' || str_starts_with($base, '.env.')) && $base !== '.env.example') {
             throw new RuntimeException('Checkpoint contains a real environment file: '.$path.'.');
         }
-        if (!preg_match('/\\\\.(php|blade\\\\.php|css|js|json|md|ya?ml|xml|txt|htaccess|sh)$/i', $path)
+        if (!preg_match('/[.](php|css|js|json|md|ya?ml|xml|txt|htaccess|sh)$/i', $path)
             && !in_array($base, ['artisan','dockerfile','.gitignore','.env.example'], true)) {
             throw new RuntimeException('Checkpoint contains an unsupported or binary file: '.$path.'.');
         }
