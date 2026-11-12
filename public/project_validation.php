@@ -161,6 +161,9 @@ function nira_validate_project_source_contracts(array $files): void {
         }
     }
     nira_validate_model_schema_columns($files);
+    nira_validate_unique_project_paths($files);
+    nira_validate_ui_interaction_contracts($files);
+    nira_validate_feature_test_quality($files);
 }
 
 /** Re-open the archive and compare every stored entry with the validated source map. */
@@ -179,4 +182,69 @@ function verify_generated_project_zip(string $zipPath,array $files): string {
     $hash=hash_file('sha256',$zipPath);
     if(!is_string($hash)||strlen($hash)!==64) throw new RuntimeException('Could not calculate final ZIP checksum.');
     return $hash;
+}
+
+
+/** Reject path aliases that collide on common case-insensitive filesystems. */
+function nira_validate_unique_project_paths(array $files): void {
+    $seen = [];
+    foreach (array_keys($files) as $path) {
+        if (!is_string($path) || $path === '' || str_contains($path, "\\\\") || str_starts_with($path, '/')) {
+            throw new RuntimeException('Generated project contains an invalid normalized file path.');
+        }
+        $parts = explode('/', $path);
+        if (in_array('', $parts, true) || in_array('.', $parts, true) || in_array('..', $parts, true)) {
+            throw new RuntimeException('Generated project contains an ambiguous file path: '.$path.'.');
+        }
+        $key = strtolower(implode('/', $parts));
+        if (isset($seen[$key]) && $seen[$key] !== $path) {
+            throw new RuntimeException('Generated project contains case-insensitive duplicate paths: '.$seen[$key].' and '.$path.'.');
+        }
+        $seen[$key] = $path;
+    }
+}
+
+/**
+ * Catch common UI defects that syntax and route checks cannot see:
+ * unsafe placeholder links/actions and state-changing forms without CSRF/method spoofing.
+ */
+function nira_validate_ui_interaction_contracts(array $files): void {
+    foreach ($files as $path => $source) {
+        if (!str_starts_with($path, 'resources/views/') || !str_ends_with(strtolower($path), '.blade.php')) continue;
+        $clean = preg_replace('/\\{{--.*?--}}/s', '', $source) ?? $source;
+        $clean = preg_replace('/<!--.*?-->/s', '', $clean) ?? $clean;
+        if (preg_match('/\\b(?:href|action|formaction)\\s*=\\s*(["\\'])\\s*(?:#|javascript\\s*:)/i', $clean, $bad)) {
+            throw new RuntimeException('Blade view contains a non-functional placeholder link or form action in '.$path.'. Replace it with a real route or a button with an implemented action.');
+        }
+        if (preg_match('/\\bon(?:click|submit)\\s*=\\s*(["\\'])\\s*\\1/i', $clean)) {
+            throw new RuntimeException('Blade view contains an empty event handler in '.$path.'.');
+        }
+        if (!preg_match_all('/<form\\b([^>]*)>(.*?)<\\/form\\s*>/is', $clean, $forms, PREG_SET_ORDER)) continue;
+        foreach ($forms as $form) {
+            $attributes = $form[1] ?? '';
+            $body = $form[2] ?? '';
+            if (preg_match('/\\bmethod\\s*=\\s*(["\\'])(post|put|patch|delete)\\1/i', $attributes)) {
+                if (!preg_match('/@csrf|csrf_field\\s*\\(|name\\s*=\\s*(["\\'])_token\\1/i', $body)) {
+                    throw new RuntimeException('State-changing form is missing CSRF protection in '.$path.'.');
+                }
+                if (preg_match('/\\bmethod\\s*=\\s*(["\\'])(put|patch|delete)\\1/i', $attributes)
+                    && !preg_match('/@method\\s*\\(|method_field\\s*\\(|name\\s*=\\s*(["\\'])_method\\1/i', $body)) {
+                    throw new RuntimeException('State-changing form is missing Laravel method spoofing in '.$path.'.');
+                }
+            }
+        }
+    }
+}
+
+/** Ensure generated feature tests contain executable test cases and multiple assertions. */
+function nira_validate_feature_test_quality(array $files): void {
+    foreach ($files as $path => $source) {
+        if (!preg_match('#^tests/Feature/.+\\.php$#i', $path)) continue;
+        $withoutComments = preg_replace('~/\\*.*?\\*/|(?m)//.*$|(?m)^\\s*#.*$~s', '', $source) ?? $source;
+        $hasTest = preg_match('/\\bfunction\\s+[A-Za-z_][A-Za-z0-9_]*test[A-Za-z0-9_]*\\s*\\(|\\b(?:it|test)\\s*\\(/i', $withoutComments) === 1;
+        preg_match_all('/(?:->|::)assert[A-Za-z0-9_]*\\s*\\(|\\bassert[A-Z][A-Za-z0-9_]*\\s*\\(/', $withoutComments, $assertions);
+        if (!$hasTest || count($assertions[0] ?? []) < 2) {
+            throw new RuntimeException('Feature test is too shallow or has no executable test case: '.$path.'. Add a real test case with at least two meaningful assertions.');
+        }
+    }
 }

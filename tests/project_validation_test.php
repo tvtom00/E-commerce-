@@ -57,6 +57,30 @@ $broken=$valid;
 $broken['app/Http/Controllers/StoreController.php']="<?php\nnamespace App\\Http\\Controllers;\nclass WrongName {}";
 expect_project_failure($broken,'PSR-4 class path mismatch');
 
+
+$uiValid = $valid;
+$uiValid['resources/views/store/form.blade.php'] = '<form method="POST" action="/contact">@csrf<input name="message"><button type="submit">Send</button></form>';
+nira_validate_project_source_contracts($uiValid);
+
+$uiBroken = $valid;
+$uiBroken['resources/views/store/form.blade.php'] = '<form method="POST" action="/contact"><input name="message"><button>Send</button></form>';
+expect_project_failure($uiBroken, 'missing CSRF protection');
+
+$uiBroken = $valid;
+$uiBroken['resources/views/store/form.blade.php'] = '<a href="#">Shop now</a>';
+expect_project_failure($uiBroken, 'non-functional placeholder link');
+
+$pathBroken = $valid;
+$pathBroken['resources/views/Store/index.blade.php'] = '<p>duplicate path</p>';
+expect_project_failure($pathBroken, 'case-insensitive duplicate paths');
+
+$testQuality = $valid;
+$testQuality['tests/Feature/StorefrontTest.php'] = "<?php class StorefrontTest { public function test_storefront_loads() { \$this->assertTrue(true); } }";
+expect_project_failure($testQuality, 'too shallow');
+
+$testQuality['tests/Feature/StorefrontTest.php'] = "<?php class StorefrontTest { public function test_storefront_loads() { \$this->assertTrue(true); \$this->assertSame(200, 200); } }";
+nira_validate_project_source_contracts($testQuality);
+
 if(!class_exists(ZipArchive::class)) throw new RuntimeException('ZIP extension is required for this test.');
 $temp=sys_get_temp_dir().'/nira-zip-check-'.bin2hex(random_bytes(5));
 if(!mkdir($temp,0700,true)) throw new RuntimeException('Could not create test directory.');

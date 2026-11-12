@@ -38,3 +38,10 @@ GET /health returns service health.
 
 ## Resource limits
 Generation is limited to 100 text files, 120 KB per file, 3 MB total source, and 12 KB request payload. Gemini is the primary free-tier provider (Gemini 3.8 Flash, then 3.6 Flash fallback), Groq is secondary, and OpenAI is disabled unless explicitly enabled. The Laravel project is generated in eleven sequential bounded batches. With `NIRA_GITHUB_TOKEN` configured, each completed batch is committed to a private `nira-resume-<id>` checkpoint repository. If a later provider fails, retry Generate with the same project name and prompt; the builder resumes from the last completed batch instead of regenerating earlier batches. The resume ID is retained in the browser for the same request. Completed checkpoint repositories can be deleted from GitHub when no longer needed. Generated ZIPs use S3-compatible external storage when configured; otherwise they are stored on the container filesystem and can be lost on restart/redeploy. This service does not deploy generated projects to production. Review and merge the GitHub pull request, configure MySQL and provider credentials, then deploy separately.
+
+
+## Generated-project completeness gates
+
+Before a generated ZIP is marked complete, the builder validates the full saved file inventory and cross-file contracts, including PHP syntax, Laravel imports/routes/controllers, referenced Blade views, model-to-migration columns, duplicate paths that would collide on case-insensitive filesystems, state-changing form CSRF/method spoofing, placeholder links/actions, feature-test depth, and ZIP entry/content integrity. Missing required files or failed checks keep the project out of the final-download success path and trigger the existing checkpoint-preserving repair flow. A generation batch is only considered saved after its checkpoint write succeeds; retries resume from the last committed batch.
+
+These are static/source-level gates, not a claim that every third-party integration is live. Generated applications still require their own dependency installation, database-backed test run, credentials, and provider sandbox configuration before production use.
