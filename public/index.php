@@ -519,10 +519,12 @@ function build_repair_source_context(array $files, string $diagnostic, int $maxB
 function validate_laravel_project(array $rawFiles): array {
     $required = [
         'Dockerfile','docker/entrypoint.sh','composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
-        'routes/web.php','routes/auth.php','README.md','.env.example',
+        'routes/web.php','routes/auth.php','README.md','.env.example','package.json','vite.config.js','phpunit.xml',
         '.github/workflows/laravel-validate.yml',
-        'config/auth.php','config/database.php','config/services.php',
-        'resources/views/layouts/app.blade.php','resources/views/store/index.blade.php',
+        'config/app.php','config/auth.php','config/cache.php','config/database.php','config/filesystems.php',
+        'config/hashing.php','config/logging.php','config/mail.php','config/queue.php','config/services.php','config/session.php','config/view.php',
+        'tests/TestCase.php','resources/js/bootstrap.js',
+        'resources/views/layouts/app.blade.php','resources/views/auth/login.blade.php','resources/views/auth/register.blade.php','resources/views/store/index.blade.php',
         'resources/views/store/products/show.blade.php','resources/views/cart/index.blade.php',
         'resources/views/checkout/index.blade.php','resources/views/admin/dashboard.blade.php',
         'resources/views/admin/products/index.blade.php','resources/views/admin/products/create.blade.php',
@@ -613,7 +615,7 @@ function validate_laravel_project(array $rawFiles): array {
         throw new RuntimeException('Production configuration must use MySQL; SQLite-only projects are not accepted.');
     }
     $workflow = $files['.github/workflows/laravel-validate.yml'];
-    foreach (['composer validate','composer install','php -l','php artisan test'] as $check) {
+    foreach (['composer validate','composer install','php -l','php artisan test','npm install','npm run build'] as $check) {
         if (stripos($workflow, $check) === false) throw new RuntimeException('Laravel CI workflow is missing: '.$check);
     }
     $productMigration = '';
@@ -727,6 +729,7 @@ function validate_laravel_project(array $rawFiles): array {
     if (!str_contains($all, 'Crypt::encryptString') || !str_contains($all, 'Crypt::decryptString')) {
         throw new RuntimeException('Payment and integration secrets must be encrypted at rest.');
     }
+    nira_validate_frontend_build_contracts($files);
     nira_validate_project_source_contracts($files);
     return $files;
 }
@@ -1237,8 +1240,10 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             'name'=>'framework_core',
             'paths'=>[
                 'composer.json','artisan','bootstrap/app.php','public/index.php','public/.htaccess',
-                'routes/web.php','routes/auth.php','config/auth.php','config/database.php','config/services.php',
-                '.env.example','README.md','.github/workflows/laravel-validate.yml'
+                'routes/web.php','routes/auth.php','config/app.php','config/auth.php','config/cache.php','config/database.php',
+                'config/filesystems.php','config/hashing.php','config/logging.php','config/mail.php','config/queue.php',
+                'config/services.php','config/session.php','config/view.php','package.json','vite.config.js','phpunit.xml',
+                'tests/TestCase.php','.env.example','README.md','.github/workflows/laravel-validate.yml'
             ],
             'scope'=>'Build the installable Laravel framework skeleton, production configuration, routing, auth foundation, documentation and CI workflow.'
         ],
@@ -1262,8 +1267,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         ],
         [
             'name'=>'storefront_views',
-            'paths'=>['resources/views/layouts/*','resources/views/store/*','resources/views/cart/*','resources/views/checkout/*'],
-            'scope'=>'Build responsive storefront, product, cart, checkout and order history Blade views matching completed controllers and route names.'
+            'paths'=>['resources/views/layouts/*','resources/views/store/*','resources/views/cart/*','resources/views/checkout/*','resources/views/auth/*'],
+            'scope'=>'Build responsive storefront, product, cart, checkout, customer login and registration Blade views matching completed controllers and route names.'
         ],
         [
             'name'=>'admin_controllers',
@@ -1306,8 +1311,8 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
         ],
         [
             'name'=>'frontend_assets',
-            'paths'=>['resources/css/app.css','resources/js/app.js'],
-            'scope'=>'Build responsive accessible storefront/admin styling and browser interactions matching the Blade screens. Do not add external scripts or remove required functionality.'
+            'paths'=>['resources/css/app.css','resources/js/app.js','resources/js/bootstrap.js'],
+            'scope'=>'Build responsive accessible storefront/admin styling and browser interactions matching the Blade screens. Include the Laravel JavaScript bootstrap entry. Do not add external scripts or remove required functionality.'
         ],
         [
             'name'=>'feature_tests',
