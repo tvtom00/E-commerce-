@@ -189,7 +189,7 @@ function verify_generated_project_zip(string $zipPath,array $files): string {
 function nira_validate_unique_project_paths(array $files): void {
     $seen = [];
     foreach (array_keys($files) as $path) {
-        if (!is_string($path) || $path === '' || str_contains($path, "\\\\") || str_starts_with($path, '/')) {
+        if (!is_string($path) || $path === '' || str_contains($path, chr(92)) || str_starts_with($path, '/')) {
             throw new RuntimeException('Generated project contains an invalid normalized file path.');
         }
         $parts = explode('/', $path);
@@ -211,9 +211,9 @@ function nira_validate_unique_project_paths(array $files): void {
 function nira_validate_ui_interaction_contracts(array $files): void {
     foreach ($files as $path => $source) {
         if (!str_starts_with($path, 'resources/views/') || !str_ends_with(strtolower($path), '.blade.php')) continue;
-        $clean = preg_replace('/\\{{--.*?--}}/s', '', $source) ?? $source;
+        $clean = preg_replace('/\\{\\{--.*?--\\}\\}/s', '', $source) ?? $source;
         $clean = preg_replace('/<!--.*?-->/s', '', $clean) ?? $clean;
-        if (preg_match('/\\b(?:href|action|formaction)\\s*=\\s*(["\\'])\\s*(?:#|javascript\\s*:)/i', $clean, $bad)) {
+        if (preg_match('/\\b(?:href|action|formaction)\\s*=\\s*(["\\'])\\s*(?:#\\s*\\1|javascript\\s*:)/i', $clean, $bad)) {
             throw new RuntimeException('Blade view contains a non-functional placeholder link or form action in '.$path.'. Replace it with a real route or a button with an implemented action.');
         }
         if (preg_match('/\\bon(?:click|submit)\\s*=\\s*(["\\'])\\s*\\1/i', $clean)) {
@@ -240,8 +240,8 @@ function nira_validate_ui_interaction_contracts(array $files): void {
 function nira_validate_feature_test_quality(array $files): void {
     foreach ($files as $path => $source) {
         if (!preg_match('#^tests/Feature/.+\\.php$#i', $path)) continue;
-        $withoutComments = preg_replace('~/\\*.*?\\*/|(?m)//.*$|(?m)^\\s*#.*$~s', '', $source) ?? $source;
-        $hasTest = preg_match('/\\bfunction\\s+[A-Za-z_][A-Za-z0-9_]*test[A-Za-z0-9_]*\\s*\\(|\\b(?:it|test)\\s*\\(/i', $withoutComments) === 1;
+        $withoutComments = preg_replace('~/\\*.*?\\*/|(?m)//[^\\r\\n]*|(?m)^\\s*#.*$~s', '', $source) ?? $source;
+        $hasTest = preg_match('/\\bfunction\\s+(?:test[A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*Test[A-Za-z0-9_]*)\\s*\\(|\\b(?:it|test)\\s*\\(/i', $withoutComments) === 1;
         preg_match_all('/(?:->|::)assert[A-Za-z0-9_]*\\s*\\(|\\bassert[A-Z][A-Za-z0-9_]*\\s*\\(/', $withoutComments, $assertions);
         if (!$hasTest || count($assertions[0] ?? []) < 2) {
             throw new RuntimeException('Feature test is too shallow or has no executable test case: '.$path.'. Add a real test case with at least two meaningful assertions.');

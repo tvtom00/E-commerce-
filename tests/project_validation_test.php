@@ -81,6 +81,15 @@ expect_project_failure($testQuality, 'too shallow');
 $testQuality['tests/Feature/StorefrontTest.php'] = "<?php class StorefrontTest { public function test_storefront_loads() { \$this->assertTrue(true); \$this->assertSame(200, 200); } }";
 nira_validate_project_source_contracts($testQuality);
 
+
+$uiBroken = $valid;
+$uiBroken['resources/views/store/form.blade.php'] = '<form method="PUT" action="/contact">@csrf<input name="message"></form>';
+expect_project_failure($uiBroken, 'missing Laravel method spoofing');
+
+$uiValid = $valid;
+$uiValid['resources/views/store/anchors.blade.php'] = '<a href="#products">Products</a><section id="products">Catalog</section>';
+nira_validate_project_source_contracts($uiValid);
+
 if(!class_exists(ZipArchive::class)) throw new RuntimeException('ZIP extension is required for this test.');
 $temp=sys_get_temp_dir().'/nira-zip-check-'.bin2hex(random_bytes(5));
 if(!mkdir($temp,0700,true)) throw new RuntimeException('Could not create test directory.');
