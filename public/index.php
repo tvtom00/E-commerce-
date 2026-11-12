@@ -606,10 +606,7 @@ function validate_laravel_project(array $rawFiles): array {
             throw new RuntimeException('Generated deployment entrypoint is missing safe startup behavior: '.$runtimeNeedle);
         }
     }
-    $manifest = json_decode($files['composer.json'], true);
-    if (!is_array($manifest) || !isset($manifest['require']['laravel/framework'], $manifest['require']['php'])) {
-        throw new RuntimeException('composer.json must require laravel/framework and declare a supported PHP version.');
-    }
+    nira_validate_composer_contracts($files);
     if (!str_contains(strtolower($files['config/database.php']), 'mysql')
         || !preg_match('/(?m)^DB_CONNECTION=mysql\\s*$/', $files['.env.example'])) {
         throw new RuntimeException('Production configuration must use MySQL; SQLite-only projects are not accepted.');
