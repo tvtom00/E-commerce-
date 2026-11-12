@@ -1332,10 +1332,10 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     $rateData = is_string($rateRaw) ? json_decode($rateRaw, true) : null;
     $now = time();
     $recent = array_values(array_filter(is_array($rateData) ? ($rateData['timestamps'] ?? []) : [], static fn($t): bool => is_int($t) && $t > $now - 3600));
-    if (count($recent) >= 5) {
+    if (count($recent) >= 20) {
         flock($rateHandle, LOCK_UN); fclose($rateHandle);
         header('Retry-After: 3600');
-        respond(429, ['error'=>'এই নেটওয়ার্ক থেকে এক ঘণ্টায় সর্বোচ্চ ৫টি Generation করা যাবে। পরে আবার চেষ্টা করুন।']);
+        respond(429, ['error'=>'এই নেটওয়ার্ক থেকে এক ঘণ্টায় সর্বোচ্চ ২০টি Generation করা যাবে। পরে আবার চেষ্টা করুন।']);
     }
     $recent[] = $now;
     rewind($rateHandle); ftruncate($rateHandle, 0);
