@@ -993,7 +993,7 @@ function checkpoint_load_local(string $resumeId, string $promptHash): array {
     $path=checkpoint_local_path($resumeId);
     if(!is_file($path)) return checkpoint_empty();
     $saved=json_decode((string)file_get_contents($path),true);
-    if(!is_array($saved)||(!hash_equals($promptHash,(string)($saved['prompt_hash']??'')) && (string)($saved['project']??'') !== (string)($GLOBALS['NIRA_PROJECT_NAME']??''))) throw new RuntimeException('Resume ID does not match this project.');
+    if(!is_array($saved)||!nira_checkpoint_matches_request($saved,$promptHash)) throw new RuntimeException('Resume ID does not match this exact project name and prompt. Start a new generation if the website brief changed.');
     $files=$saved['files']??[];
     if(!is_array($files)||count($files)>MAX_OUTPUT_FILES) throw new RuntimeException('Saved checkpoint file list is invalid.');
     $total=0;
@@ -1021,7 +1021,7 @@ function checkpoint_load_github(array $cp, string $hash, string $token): array {
     $blob=github_api('GET','/repos/'.$owner.'/'.$repo.'/git/blobs/'.$metaSha,$token);
     $metaText=base64_decode((string)($blob['content']??''),true);
     $meta=is_string($metaText)?json_decode($metaText,true):null;
-    if(!is_array($meta)||(!hash_equals($hash,(string)($meta['prompt_hash']??'')) && (string)($meta['project']??'') !== (string)($GLOBALS['NIRA_PROJECT_NAME']??''))) throw new RuntimeException('Resume ID does not match this project.');
+    if(!is_array($meta)||!nira_checkpoint_matches_request($meta,$hash)) throw new RuntimeException('Resume ID does not match this exact project name and prompt. Start a new generation if the website brief changed.');
     $fileShas=$meta['files']??[];
     if(!is_array($fileShas)||count($fileShas)>MAX_OUTPUT_FILES) throw new RuntimeException('Saved checkpoint metadata is invalid.');
     $files=[]; $total=0;
@@ -1132,15 +1132,15 @@ button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#c
 <button id="go">Generate website ZIP</button><div id="status"></div><section id="preview"><h2>Static preview (safe mode)</h2><p class="small">এটি generated Blade/CSS থেকে তৈরি নিরাপদ static preview; Laravel/PHP বা generated JavaScript এখানে execute হয় না।</p><div class="preview-tabs"><button id="storeTab" type="button">Storefront</button><button id="adminTab" type="button">Admin Panel</button></div><iframe id="previewFrame" title="Website preview" sandbox=""></iframe></section><section id="revise" style="margin-top:24px;border-top:1px solid #344464;padding-top:20px"><h2>Existing draft design edit</h2><p class="small">Private Nira draft-এর owner ও repository name দিয়ে লিখুন কী পরিবর্তন চান। শুধু Blade/CSS/JS UI বদলাবে; backend/payment/security code অপরিবর্তিত থাকবে।</p><label>GitHub owner</label><input id="revOwner" placeholder="GitHub owner"><label>Private draft repository</label><input id="revRepo" placeholder="repository-name"><label>কী পরিবর্তন করতে চান?</label><textarea id="revInstruction" style="min-height:90px" placeholder="যেমন: সব primary button নীল করো, storefront header আরও modern করো..."></textarea><button id="revGo" type="button">Draft-এ পরিবর্তন করো এবং Preview দেখাও</button><div id="revStatus" class="small"></div></section><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
-const resumeStoreKey='niraBuilderResumeV2';const knownResumeByProject={'my-store':'bca8a023d8366a7b01423014'};const initialProjectKey=document.getElementById('name').value.trim().toLowerCase();let resumeData=null;try{resumeData=JSON.parse(localStorage.getItem(resumeStoreKey)||'null')}catch(e){resumeData=null}if(resumeData&&resumeData.key!==initialProjectKey){resumeData=null;localStorage.removeItem(resumeStoreKey)}let resumeId=knownResumeByProject[initialProjectKey]||resumeData?.id||null;
-b.onclick=async()=>{const requestKey=document.getElementById('name').value.trim().toLowerCase();const knownId=knownResumeByProject[requestKey]||null;if(knownId)resumeId=knownId;else if(resumeData&&resumeData.key===requestKey)resumeId=resumeData.id;else resumeId=null;if(resumeData&&resumeData.key!==requestKey){resumeData=null;localStorage.removeItem(resumeStoreKey)}b.disabled=true;s.textContent=resumeId?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে...':'প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
-const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:document.getElementById('prompt').value,name:document.getElementById('name').value,resume_id:resumeId})});
+const resumeStoreKey='niraBuilderResumeV3';const legacyResumeStoreKey='niraBuilderResumeV2';localStorage.removeItem(legacyResumeStoreKey);let resumeData=null;let resumeId=null;try{resumeData=JSON.parse(localStorage.getItem(resumeStoreKey)||'null')}catch(e){resumeData=null}async function makeResumeFingerprint(name,prompt){const bytes=new TextEncoder().encode(name+'\\n'+prompt);if(globalThis.crypto&&globalThis.crypto.subtle){const digest=await globalThis.crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join('')}let hash=2166136261;for(const value of bytes)hash=Math.imul(hash^value,16777619);return 'fallback-'+(hash>>>0).toString(16)}
+b.onclick=async()=>{const requestKey=document.getElementById('name').value.trim().toLowerCase();const requestPrompt=document.getElementById('prompt').value.trim();const requestFingerprint=await makeResumeFingerprint(requestKey,requestPrompt);if(resumeData&&resumeData.fingerprint===requestFingerprint)resumeId=resumeData.id;else{resumeId=null;resumeData=null;localStorage.removeItem(resumeStoreKey)}b.disabled=true;s.textContent=resumeId?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে...':'প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
+const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:requestPrompt,name:document.getElementById('name').value,resume_id:resumeId})});
 if(!r.ok && !r.body)throw Error('Generation failed');
 const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
 while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
 for(const block of blocks){const ev=(block.match(/^event: (.+)$/m)||[])[1],data=(block.match(/^data: (.+)$/m)||[])[1];if(!data)continue;const j=JSON.parse(data);
-if(ev==='progress'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}s.textContent=j.message+'\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
-if(ev==='error'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,key:requestKey};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}throw Error((j.error||'Generation failed')+(j.detail?'\nকারণ: '+j.detail:'')+(resumeId?'\nআবার Generate চাপলে শেষ সফল ব্যাচ থেকে চলবে.':''));}
+if(ev==='progress'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,fingerprint:requestFingerprint};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}s.textContent=j.message+'\nঅগ্রগতি: '+(j.percent||0)+'% · ফাইল: '+(j.files_created||0);if(j.preview?.storefront_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame');section.style.display='block';frame.srcdoc=j.preview.storefront_html;}}
+if(ev==='error'){if(j.resume_id){resumeId=j.resume_id;resumeData={id:resumeId,fingerprint:requestFingerprint};localStorage.setItem(resumeStoreKey,JSON.stringify(resumeData));}throw Error((j.error||'Generation failed')+(j.detail?'\nকারণ: '+j.detail:'')+(resumeId?'\nআবার Generate চাপলে শেষ সফল ব্যাচ থেকে চলবে.':''));}
 if(ev==='complete'){completed=j;resumeId=null;resumeData=null;localStorage.removeItem(resumeStoreKey);}
 }}
 if(!completed)throw Error('Builder connection ended before completion.');
@@ -1445,6 +1445,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             respond(502, ['error'=>'AI returned an empty '.$batch['name'].' batch.']);
         }
         try {
+            nira_validate_checkpoint_file_map($allGeneratedFiles);
             if($checkpoint!==null) {
                 $fileShas=checkpoint_save_github($checkpoint,$batchNewFiles,$fileShas,$batchIndex,$previewId,$promptHash,$name?:'website',$githubToken,$repairState);
             } else {
