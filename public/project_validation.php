@@ -213,22 +213,22 @@ function nira_validate_ui_interaction_contracts(array $files): void {
         if (!str_starts_with($path, 'resources/views/') || !str_ends_with(strtolower($path), '.blade.php')) continue;
         $clean = preg_replace('/\\{\\{--.*?--\\}\\}/s', '', $source) ?? $source;
         $clean = preg_replace('/<!--.*?-->/s', '', $clean) ?? $clean;
-        if (preg_match('/\\b(?:href|action|formaction)\\s*=\\s*(["\\'])\\s*(?:#\\s*\\1|javascript\\s*:)/i', $clean, $bad)) {
+        if (preg_match('/\\b(?:href|action|formaction)\\s*=\\s*(\\x22|\\x27)\\s*(?:#\\s*\\1|javascript\\s*:)/i', $clean)) {
             throw new RuntimeException('Blade view contains a non-functional placeholder link or form action in '.$path.'. Replace it with a real route or a button with an implemented action.');
         }
-        if (preg_match('/\\bon(?:click|submit)\\s*=\\s*(["\\'])\\s*\\1/i', $clean)) {
+        if (preg_match('/\\bon(?:click|submit)\\s*=\\s*(\\x22|\\x27)\\s*\\1/i', $clean)) {
             throw new RuntimeException('Blade view contains an empty event handler in '.$path.'.');
         }
         if (!preg_match_all('/<form\\b([^>]*)>(.*?)<\\/form\\s*>/is', $clean, $forms, PREG_SET_ORDER)) continue;
         foreach ($forms as $form) {
             $attributes = $form[1] ?? '';
             $body = $form[2] ?? '';
-            if (preg_match('/\\bmethod\\s*=\\s*(["\\'])(post|put|patch|delete)\\1/i', $attributes)) {
-                if (!preg_match('/@csrf|csrf_field\\s*\\(|name\\s*=\\s*(["\\'])_token\\1/i', $body)) {
+            if (preg_match('/\\bmethod\\s*=\\s*(\\x22|\\x27)(post|put|patch|delete)\\1/i', $attributes)) {
+                if (!preg_match('/@csrf|csrf_field\\s*\\(|name\\s*=\\s*(\\x22|\\x27)_token\\1/i', $body)) {
                     throw new RuntimeException('State-changing form is missing CSRF protection in '.$path.'.');
                 }
-                if (preg_match('/\\bmethod\\s*=\\s*(["\\'])(put|patch|delete)\\1/i', $attributes)
-                    && !preg_match('/@method\\s*\\(|method_field\\s*\\(|name\\s*=\\s*(["\\'])_method\\1/i', $body)) {
+                if (preg_match('/\\bmethod\\s*=\\s*(\\x22|\\x27)(put|patch|delete)\\1/i', $attributes)
+                    && !preg_match('/@method\\s*\\(|method_field\\s*\\(|name\\s*=\\s*(\\x22|\\x27)_method\\1/i', $body)) {
                     throw new RuntimeException('State-changing form is missing Laravel method spoofing in '.$path.'.');
                 }
             }
