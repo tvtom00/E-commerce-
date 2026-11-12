@@ -1516,7 +1516,11 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             }
             if (!$pathAllowed) respond(502, ['error'=>'AI generated a file outside the '.$batch['name'].' batch scope: '.$generatedPath]);
             if (isset($allGeneratedFiles[$generatedPath])) {
-                respond(502, ['error'=>'AI generated a duplicate path across batches: '.$generatedPath]);
+                if (hash_equals(hash('sha256',(string)$allGeneratedFiles[$generatedPath]),hash('sha256',$generatedFile['content']))) {
+                    $batchNewFiles[$generatedPath]=$generatedFile['content'];
+                    continue;
+                }
+                respond(502, ['error'=>'AI generated a conflicting duplicate path across batches: '.$generatedPath]);
             }
             $allGeneratedFiles[$generatedPath] = $generatedFile['content'];
             $batchNewFiles[$generatedPath] = $generatedFile['content'];
