@@ -1073,6 +1073,67 @@ function checkpoint_save_github(array $cp, array $newFiles, array $fileShas, int
     return $fileShas;
 }
 
+function ai_generate_batch_adaptively(array $batch, string $system, string $prompt, string $contractContext,
+    array $existingFiles, callable $onFile): array {
+    $patterns = implode("\n- ", $batch['paths']);
+    $existingPaths = implode("\n- ", array_slice(array_keys($existingFiles), -180));
+    $manifestPrompt = $system."\n\nADAPTIVE RECOVERY / FILE INVENTORY MODE.\n".
+        "Return JSON only: {\"paths\":[\"relative/path\", ...]}. List every concrete file required by this batch, ".
+        "including all files explicitly required by the project specification. Only paths matching:\n- ".$patterns.
+        "\nAlready completed paths (do not repeat):\n".$existingPaths.
+        "\nBatch: ".$batch['name']."\nScope: ".$batch['scope']."\nUser requirements:\n".$prompt.$contractContext;
+    $manifestResult = ai_request_json($manifestPrompt, 1800);
+    $manifest = json_decode($manifestResult['text'] ?? '', true);
+    if (!is_array($manifest) || !isset($manifest['paths']) || !is_array($manifest['paths'])
+        || count($manifest['paths']) < 1 || count($manifest['paths']) > 120)
+        throw new RuntimeException('Adaptive recovery could not produce a bounded file inventory.');
+    $paths = [];
+    foreach ($manifest['paths'] as $candidate) {
+        if (!is_string($candidate)) throw new RuntimeException('Adaptive inventory contains a non-string path.');
+        $path = clean_name($candidate);
+        $allowed = false;
+        foreach ($batch['paths'] as $pattern) if (fnmatch($pattern, $path)) { $allowed = true; break; }
+        if (!$allowed) throw new RuntimeException('Adaptive inventory proposed an out-of-scope path: '.$path);
+        if (!isset($existingFiles[$path]) && !in_array($path, $paths, true)) $paths[] = $path;
+    }
+    if (!$paths) throw new RuntimeException('Adaptive inventory contained no unfinished files.');
+    $created = [];
+    foreach ($paths as $index => $path) {
+        $filePrompt = $system."\n\nADAPTIVE RECOVERY / SINGLE FILE MODE.\nGenerate exactly ONE complete file at this exact path: ".$path.
+            "\nReturn JSON only: {\"files\":[{\"path\":\"".$path."\",\"content\":\"complete file content\"}]}.".
+            "\nNo other paths, placeholders, TODOs, fake success, credentials or binary content.".
+            "\nBatch: ".$batch['name']."\nScope: ".$batch['scope']."\nUser requirements:\n".$prompt.$contractContext.
+            "\nPreviously completed paths (read-only):\n".$existingPaths;
+        $lastError = null;
+        for ($attempt=1; $attempt<=3; $attempt++) {
+            try {
+                $one = ai_request_json($filePrompt, max(1200,3600-(($attempt-1)*900)));
+                if (in_array((string)($one['finish_reason']??''),['MAX_TOKENS','length'],true))
+                    throw new AiOutputLimitException('Single-file output was truncated.');
+                $decoded=json_decode($one['text']??'',true);
+                if (!is_array($decoded)||!isset($decoded['files'])||!is_array($decoded['files'])||count($decoded['files'])!==1)
+                    throw new AiJsonFormatException('Single-file response was not valid one-file JSON.');
+                $record=$decoded['files'][0];
+                if (!is_array($record)||($record['path']??null)!==$path||!is_string($record['content']??null)
+                    ||trim($record['content'])===''||strlen($record['content'])>MAX_FILE_BYTES)
+                    throw new RuntimeException('Single-file response failed path/content/size validation for '.$path);
+                $created[$path]=$record['content'];
+                $onFile($path,$record['content'],$created);
+                progress_event('progress',['stage'=>'adaptive_subbatch_file','batch'=>$batch['name'],
+                    'files_created'=>count($existingFiles)+count($created),'subbatch_file'=>$index+1,
+                    'subbatch_total'=>count($paths),'message'=>'বড় ব্যাচ ছোট ফাইলে ভাগ করে তৈরি হচ্ছে: '.$path]);
+                continue 2;
+            } catch (Throwable $error) {
+                $lastError=$error;
+                if ($attempt<3) $filePrompt.="\nRETRY ".$attempt.": Previous output failed. Correct this exact issue: ".substr($error->getMessage(),0,300).
+                    ". Return only the one complete file, compact valid JSON, and preserve required behavior.";
+            }
+        }
+        throw new RuntimeException('Adaptive recovery exhausted retries for '.$path.': '.($lastError?->getMessage()??'unknown failure'));
+    }
+    return $created;
+}
+
 function generation_progress_percent(int $completedBatches): int {
     // Preserve the old 12-batch progress scale: the final test batch is split
     // into two half-sized batches, so resuming an old checkpoint does not jump backwards.
@@ -1408,7 +1469,24 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                 $aiResult=ai_request_json($batchText.$compactNote,$outputTokens);
                 break;
             } catch(AiOutputLimitException|AiJsonFormatException $e) {
-                if($batchTry>=2) respond(502,['error'=>'AI output/JSON limit reached in '.$batch['name'].' batch, even in compact mode.','detail'=>$e->getMessage()]);
+                if($batchTry>=2) {
+                    progress_event('progress',['resume_id'=>$resumeId,'stage'=>'adaptive_recovery','batch'=>$batchIndex+1,
+                        'total_batches'=>$batchTotal,'message'=>'বড় ব্যাচ সীমায় আটকে গেছে; একেকটি ফাইল আলাদাভাবে তৈরি হচ্ছে']);
+                    try {
+                        $adaptiveFiles=ai_generate_batch_adaptively($batch,$system,$prompt,$contractContext,$allGeneratedFiles,
+                            function(string $path,string $content,array $created) use (&$allGeneratedFiles,&$fileShas,$checkpoint,$githubToken,$resumeId,$batchIndex,$previewId,$promptHash,$name,&$repairState): void {
+                                $allGeneratedFiles[$path]=$content;
+                                nira_validate_checkpoint_file_map($allGeneratedFiles);
+                                if($checkpoint!==null) $fileShas=checkpoint_save_github($checkpoint,[$path=>$content],$fileShas,$batchIndex-1,$previewId,$promptHash,$name?:'website',$githubToken,$repairState);
+                                else checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex-1,$previewId,$promptHash,$name?:'website',$repairState);
+                            });
+                        $batchNewFiles=$adaptiveFiles;
+                        $aiResult=['text'=>json_encode(['files'=>array_map(static fn($p,$c)=>['path'=>$p,'content'=>$c],array_keys($adaptiveFiles),array_values($adaptiveFiles)),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'finish_reason'=>'STOP'];
+                        break;
+                    } catch(Throwable $adaptiveError) {
+                        respond(502,['error'=>'Adaptive recovery could not complete '.$batch['name'].' batch.','detail'=>$adaptiveError->getMessage(),'resume_id'=>$resumeId]);
+                    }
+                }
                 $compactNote="\nCOMPACT MODE: the previous response exceeded the output or JSON-format limit. Return every required file in this batch, but use concise production-ready code, no comments or sample text, minimal markup, and valid complete JSON.";
                 progress_event('progress',['resume_id'=>$resumeId,'stage'=>$batch['name'].'_compact_retry','batch'=>$batchIndex+1,
                     'total_batches'=>$batchTotal,'message'=>'আউটপুট/JSON সীমা হয়েছে, ছোট করে আবার চেষ্টা হচ্ছে']);
