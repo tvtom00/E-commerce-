@@ -1082,21 +1082,44 @@ function ai_generate_batch_adaptively(array $batch, string $system, string $prom
         "including all files explicitly required by the project specification. Only paths matching:\n- ".$patterns.
         "\nAlready completed paths (do not repeat):\n".$existingPaths.
         "\nBatch: ".$batch['name']."\nScope: ".$batch['scope']."\nUser requirements:\n".$prompt.$contractContext;
-    $manifestResult = ai_request_json($manifestPrompt, 1800);
-    $manifest = json_decode($manifestResult['text'] ?? '', true);
-    if (!is_array($manifest) || !isset($manifest['paths']) || !is_array($manifest['paths'])
-        || count($manifest['paths']) < 1 || count($manifest['paths']) > 120)
-        throw new RuntimeException('Adaptive recovery could not produce a bounded file inventory.');
     $paths = [];
-    foreach ($manifest['paths'] as $candidate) {
-        if (!is_string($candidate)) throw new RuntimeException('Adaptive inventory contains a non-string path.');
-        $path = clean_name($candidate);
-        $allowed = false;
-        foreach ($batch['paths'] as $pattern) if (fnmatch($pattern, $path)) { $allowed = true; break; }
-        if (!$allowed) throw new RuntimeException('Adaptive inventory proposed an out-of-scope path: '.$path);
-        if (!isset($existingFiles[$path]) && !in_array($path, $paths, true)) $paths[] = $path;
+    $manifestError = null;
+    for ($manifestAttempt = 1; $manifestAttempt <= 3; $manifestAttempt++) {
+        try {
+            $manifestResult = ai_request_json($manifestPrompt, 1800);
+            $manifest = json_decode($manifestResult['text'] ?? '', true);
+            if (!is_array($manifest) || !isset($manifest['paths']) || !is_array($manifest['paths'])
+                || count($manifest['paths']) < 1 || count($manifest['paths']) > 120) {
+                throw new AiJsonFormatException('Adaptive inventory must contain between 1 and 120 relative paths.');
+            }
+            $candidatePaths = [];
+            foreach ($manifest['paths'] as $candidate) {
+                if (!is_string($candidate)) throw new AiJsonFormatException('Adaptive inventory contains a non-string path.');
+                $path = clean_name($candidate);
+                $allowed = false;
+                foreach ($batch['paths'] as $pattern) if (fnmatch($pattern, $path)) { $allowed = true; break; }
+                if (!$allowed) throw new AiJsonFormatException('Adaptive inventory proposed an out-of-scope path: '.$path);
+                if (!isset($existingFiles[$path]) && !in_array($path, $candidatePaths, true)) $candidatePaths[] = $path;
+            }
+            if (!$candidatePaths) throw new AiJsonFormatException('Adaptive inventory contained no unfinished files.');
+            $paths = $candidatePaths;
+            break;
+        } catch (Throwable $error) {
+            $manifestError = $error;
+            $message = $error->getMessage();
+            $retryable = $error instanceof AiOutputLimitException || $error instanceof AiJsonFormatException
+                || preg_match('/HTTP (429|500|502|503|504)|timed? out|timeout|temporar|connection reset|could not resolve|network/i', $message);
+            if (!$retryable || $manifestAttempt === 3) break;
+            $manifestPrompt .= "\nINVENTORY RETRY ".$manifestAttempt.": The previous inventory failed validation: ".
+                substr($message, 0, 350).". Return only a corrected JSON object with 1-120 in-scope unfinished paths. ".
+                "Do not include absolute paths, traversal segments, duplicates, or files outside the listed batch patterns.";
+            sleep($manifestAttempt);
+        }
     }
-    if (!$paths) throw new RuntimeException('Adaptive inventory contained no unfinished files.');
+    if (!$paths) {
+        throw new RuntimeException('Adaptive recovery could not produce a safe bounded file inventory after 3 attempts: '.
+            ($manifestError?->getMessage() ?? 'unknown inventory failure'));
+    }
     $created = [];
     foreach ($paths as $index => $path) {
         $filePrompt = $system."\n\nADAPTIVE RECOVERY / SINGLE FILE MODE.\nGenerate exactly ONE complete file at this exact path: ".$path.
