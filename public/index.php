@@ -1248,13 +1248,13 @@ button:disabled{opacity:.5}#status{white-space:pre-wrap;margin-top:18px;color:#c
 .preview-tabs{display:flex;gap:8px;margin:12px 0}.preview-tabs button{font-size:14px;padding:9px 14px}
 </style><main><h1>Nira AI Website Builder</h1><p>আপনার ওয়েবসাইটের ধরন, পেজ, ডিজাইন ও ফিচার লিখুন। Nira AI একটি প্রজেক্ট ZIP তৈরি করবে।</p>
 <label>ওয়েবসাইটের নির্দেশনা</label><textarea id="prompt" placeholder="যেমন: আধুনিক e-commerce website, product catalog, cart, admin dashboard, Bangla/English..."></textarea>
-<label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40"><label>Access token (যদি সার্ভারে সেট করা থাকে)</label><input id="token" type="password" autocomplete="off" placeholder="NIRA_BUILDER_TOKEN">
-<button id="go">Generate website ZIP</button><div id="status"></div><section id="preview"><h2>Static preview (safe mode)</h2><p class="small">এটি generated Blade/CSS থেকে তৈরি নিরাপদ static preview; Laravel/PHP বা generated JavaScript এখানে execute হয় না।</p><div class="preview-tabs"><button id="storeTab" type="button">Storefront</button><button id="adminTab" type="button">Admin Panel</button></div><iframe id="previewFrame" title="Website preview" sandbox=""></iframe></section><section id="revise" style="margin-top:24px;border-top:1px solid #344464;padding-top:20px"><h2>Existing draft design edit</h2><p class="small">Private Nira draft-এর owner ও repository name দিয়ে লিখুন কী পরিবর্তন চান। শুধু Blade/CSS/JS UI বদলাবে; backend/payment/security code অপরিবর্তিত থাকবে।</p><label>GitHub owner</label><input id="revOwner" placeholder="GitHub owner"><label>Private draft repository</label><input id="revRepo" placeholder="repository-name"><label>কী পরিবর্তন করতে চান?</label><textarea id="revInstruction" style="min-height:90px" placeholder="যেমন: সব primary button নীল করো, storefront header আরও modern করো..."></textarea><button id="revGo" type="button">Draft-এ পরিবর্তন করো এবং Preview দেখাও</button><div id="revStatus" class="small"></div></section><p class="small">API key ও access token সার্ভারের Environment Variables-এ রাখতে হবে; এখানে লিখবেন না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
+<label>প্রজেক্টের নাম</label><input id="name" value="my-store" maxlength="40">
+<button id="go">Generate website ZIP</button><div id="status"></div><section id="preview"><h2>Static preview (safe mode)</h2><p class="small">এটি generated Blade/CSS থেকে তৈরি নিরাপদ static preview; Laravel/PHP বা generated JavaScript এখানে execute হয় না।</p><div class="preview-tabs"><button id="storeTab" type="button">Storefront</button><button id="adminTab" type="button">Admin Panel</button></div><iframe id="previewFrame" title="Website preview" sandbox=""></iframe></section><section id="revise" style="margin-top:24px;border-top:1px solid #344464;padding-top:20px"><h2>Existing draft design edit</h2><p class="small">Private Nira draft-এর owner ও repository name দিয়ে লিখুন কী পরিবর্তন চান। শুধু Blade/CSS/JS UI বদলাবে; backend/payment/security code অপরিবর্তিত থাকবে।</p><label>Advanced draft actions token (শুধু Edit/Approval-এর জন্য)</label><input id="token" type="password" autocomplete="off" placeholder="NIRA_BUILDER_TOKEN"><label>GitHub owner</label><input id="revOwner" placeholder="GitHub owner"><label>Private draft repository</label><input id="revRepo" placeholder="repository-name"><label>কী পরিবর্তন করতে চান?</label><textarea id="revInstruction" style="min-height:90px" placeholder="যেমন: সব primary button নীল করো, storefront header আরও modern করো..."></textarea><button id="revGo" type="button">Draft-এ পরিবর্তন করো এবং Preview দেখাও</button><div id="revStatus" class="small"></div></section><p class="small">API key ও GitHub token শুধু সার্ভারের Environment Variables-এ থাকবে; এখানে কোনো Builder token দিতে হবে না। Generated code আলাদা ZIP হিসেবে দেওয়া হয়, সার্ভারে স্বয়ংক্রিয়ভাবে execute করা হয় না।</p></main>
 <script>
 const b=document.getElementById('go'),s=document.getElementById('status');
 const resumeStoreKey='niraBuilderResumeV3';const legacyResumeStoreKey='niraBuilderResumeV2';localStorage.removeItem(legacyResumeStoreKey);let resumeData=null;let resumeId=null;try{resumeData=JSON.parse(localStorage.getItem(resumeStoreKey)||'null')}catch(e){resumeData=null}async function makeResumeFingerprint(name,prompt){const bytes=new TextEncoder().encode(name+'\\n'+prompt);if(globalThis.crypto&&globalThis.crypto.subtle){const digest=await globalThis.crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join('')}let hash=2166136261;for(const value of bytes)hash=Math.imul(hash^value,16777619);return 'fallback-'+(hash>>>0).toString(16)}
 b.onclick=async()=>{const requestName=document.getElementById('name').value.replace(/[^a-zA-Z0-9_-]/g,'-');const requestPrompt=document.getElementById('prompt').value.trim();const requestFingerprint=await makeResumeFingerprint(requestName,requestPrompt);if(resumeData&&resumeData.fingerprint===requestFingerprint)resumeId=resumeData.id;else{resumeId=null;resumeData=null;localStorage.removeItem(resumeStoreKey)}b.disabled=true;s.textContent=resumeId?'সংরক্ষিত অগ্রগতি থেকে আবার শুরু হচ্ছে...':'প্রজেক্ট তৈরি শুরু হচ্ছে...';try{
-const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({prompt:requestPrompt,name:document.getElementById('name').value,resume_id:resumeId})});
+const r=await fetch('/api/generate?stream=1',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'NiraBuilder'},body:JSON.stringify({prompt:requestPrompt,name:document.getElementById('name').value,resume_id:resumeId})});
 if(!r.ok && !r.body)throw Error('Generation failed');
 const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',completed=null;
 while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split(/\n\n/);buffer=blocks.pop()||'';
@@ -1278,7 +1278,7 @@ if(completed.download){const a=document.createElement('a');a.href=completed.down
 }catch(e){s.textContent='সমস্যা: '+e.message}finally{b.disabled=false}};
 const rev=document.getElementById('revGo'),rs=document.getElementById('revStatus');
 rev.onclick=async()=>{rev.disabled=true;rs.textContent='Draft পড়া ও পরিবর্তন করা হচ্ছে...';try{
-const rr=await fetch('/api/revise',{method:'POST',headers:{'Content-Type':'application/json',...(document.getElementById('token').value?{'X-Nira-Token':document.getElementById('token').value}:{})},body:JSON.stringify({owner:document.getElementById('revOwner').value.trim(),repo:document.getElementById('revRepo').value.trim(),branch:'nira-generated',instruction:document.getElementById('revInstruction').value})});
+const rr=await fetch('/api/revise',{method:'POST',headers:{'Content-Type':'application/json','X-Nira-Token':document.getElementById('token').value},body:JSON.stringify({owner:document.getElementById('revOwner').value.trim(),repo:document.getElementById('revRepo').value.trim(),branch:'nira-generated',instruction:document.getElementById('revInstruction').value})});
 const rj=await rr.json();if(!rr.ok||!rj.ok)throw Error(rj.error||'Revision failed');
 rs.textContent='Private draft আপডেট হয়েছে। পরিবর্তিত ফাইল: '+(rj.changed_files||[]).join(', ')+'। Merge বা deploy করা হয়নি।';
 if(rj.preview?.storefront_html&&rj.preview?.admin_html){const section=document.getElementById('preview'),frame=document.getElementById('previewFrame'),store=document.getElementById('storeTab'),admin=document.getElementById('adminTab');const show=(which)=>{frame.srcdoc=which==='admin'?rj.preview.admin_html:rj.preview.storefront_html;store.disabled=which==='store';admin.disabled=which==='admin';};store.onclick=()=>show('store');admin.onclick=()=>show('admin');section.style.display='block';show('store');}
@@ -1312,10 +1312,35 @@ if ($path === '/' && in_array(($_SERVER['REQUEST_METHOD'] ?? 'GET'), ['GET', 'HE
     ui();
 }
 if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
-    $expected = envv('NIRA_BUILDER_TOKEN');
-    if ($expected === '') respond(503, ['error'=>'Builder API is disabled until NIRA_BUILDER_TOKEN is configured.']);
-    $given = $_SERVER['HTTP_X_NIRA_TOKEN'] ?? '';
-    if (!hash_equals($expected, $given)) respond(401, ['error'=>'Unauthorized']);
+    // Generation is intentionally prompt-only: provider credentials remain server-side.
+    // Require a same-origin browser request and enforce a bounded per-IP generation quota.
+    $origin = (string)($_SERVER['HTTP_ORIGIN'] ?? '');
+    $host = (string)($_SERVER['HTTP_HOST'] ?? '');
+    $originHost = $origin !== '' ? (string)(parse_url($origin, PHP_URL_HOST) ?? '') : '';
+    if ($originHost === '' || strcasecmp($originHost, preg_replace('/:\\d+$/', '', $host)) !== 0) {
+        respond(403, ['error'=>'Generation requests must come from the Builder website.']);
+    }
+    $rateDir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'nira-builder-rate';
+    if (!is_dir($rateDir) && !@mkdir($rateDir, 0700, true) && !is_dir($rateDir)) {
+        respond(503, ['error'=>'Generation protection is temporarily unavailable.']);
+    }
+    $clientKey = hash('sha256', (string)($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+    $rateFile = $rateDir.DIRECTORY_SEPARATOR.$clientKey.'.json';
+    $rateHandle = @fopen($rateFile, 'c+');
+    if ($rateHandle === false || !flock($rateHandle, LOCK_EX)) respond(503, ['error'=>'Generation protection is temporarily unavailable.']);
+    $rateRaw = stream_get_contents($rateHandle);
+    $rateData = is_string($rateRaw) ? json_decode($rateRaw, true) : null;
+    $now = time();
+    $recent = array_values(array_filter(is_array($rateData) ? ($rateData['timestamps'] ?? []) : [], static fn($t): bool => is_int($t) && $t > $now - 3600));
+    if (count($recent) >= 5) {
+        flock($rateHandle, LOCK_UN); fclose($rateHandle);
+        header('Retry-After: 3600');
+        respond(429, ['error'=>'এই নেটওয়ার্ক থেকে এক ঘণ্টায় সর্বোচ্চ ৫টি Generation করা যাবে। পরে আবার চেষ্টা করুন।']);
+    }
+    $recent[] = $now;
+    rewind($rateHandle); ftruncate($rateHandle, 0);
+    fwrite($rateHandle, json_encode(['timestamps'=>$recent])); fflush($rateHandle);
+    flock($rateHandle, LOCK_UN); fclose($rateHandle);
     allow_long_execution();
     $GLOBALS['NIRA_SSE_MODE'] = (($_GET['stream'] ?? '') === '1');
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
