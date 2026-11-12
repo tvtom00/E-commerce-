@@ -68,6 +68,36 @@ function nira_validate_model_schema_columns(array $files): void {
     }
 }
 
+/** Validate Composer runtime versions and PSR-4 mappings before packaging a Laravel project. */
+function nira_validate_composer_contracts(array $files): void {
+    $raw = $files['composer.json'] ?? '';
+    $manifest = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($manifest) || json_last_error() !== JSON_ERROR_NONE) {
+        throw new RuntimeException('composer.json must be valid JSON.');
+    }
+    $require = is_array($manifest['require'] ?? null) ? $manifest['require'] : [];
+    $php = (string)($require['php'] ?? '');
+    $laravel = (string)($require['laravel/framework'] ?? '');
+    if ($php === '' || !preg_match('/(?:\^|>=\s*)8\.(?:[2-9]|[1-9][0-9])/', $php)) {
+        throw new RuntimeException('composer.json must require PHP 8.2 or newer.');
+    }
+    if ($laravel === '' || !preg_match('/(?:\^|~|>=\s*)?(?:10|11|12)\./', $laravel)) {
+        throw new RuntimeException('composer.json must require a supported Laravel 10, 11, or 12 framework version.');
+    }
+    $autoload = is_array($manifest['autoload']['psr-4'] ?? null) ? $manifest['autoload']['psr-4'] : [];
+    if (($autoload['App\\'] ?? null) !== 'app/') {
+        throw new RuntimeException('composer.json PSR-4 autoload must map App\\ to app/.');
+    }
+    $autoloadDev = is_array($manifest['autoload-dev']['psr-4'] ?? null) ? $manifest['autoload-dev']['psr-4'] : [];
+    if (($autoloadDev['Tests\\'] ?? null) !== 'tests/') {
+        throw new RuntimeException('composer.json PSR-4 autoload-dev must map Tests\\ to tests/.');
+    }
+    $requireDev = is_array($manifest['require-dev'] ?? null) ? $manifest['require-dev'] : [];
+    if (!isset($requireDev['phpunit/phpunit'])) {
+        throw new RuntimeException('composer.json must include PHPUnit for the generated Laravel test suite.');
+    }
+}
+
 /** Ensure the frontend manifest, Vite entrypoints and CI build command agree. */
 function nira_validate_frontend_build_contracts(array $files): void {
     foreach (['package.json','vite.config.js','resources/js/bootstrap.js'] as $requiredPath) {
