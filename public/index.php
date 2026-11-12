@@ -1481,7 +1481,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                                 else checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex-1,$previewId,$promptHash,$name?:'website',$repairState);
                             });
                         $batchNewFiles=$adaptiveFiles;
-                        $aiResult=['text'=>json_encode(['files'=>array_map(static fn($p,$c)=>['path'=>$p,'content'=>$c],array_keys($adaptiveFiles),array_values($adaptiveFiles)),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'finish_reason'=>'STOP'];
+                        $aiResult=['text'=>json_encode(['files'=>array_map(static fn($p,$c)=>['path'=>$p,'content'=>$c],array_keys($adaptiveFiles),array_values($adaptiveFiles))],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),'finish_reason'=>'STOP'];
                         break;
                     } catch(Throwable $adaptiveError) {
                         respond(502,['error'=>'Adaptive recovery could not complete '.$batch['name'].' batch.','detail'=>$adaptiveError->getMessage(),'resume_id'=>$resumeId]);
