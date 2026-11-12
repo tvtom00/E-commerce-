@@ -24,6 +24,22 @@ function expect_project_failure(array $files, string $expected): void {
 
 $valid=fixture_project();
 nira_validate_project_source_contracts($valid);
+
+$frontendFixture = [
+    'package.json' => json_encode(['scripts'=>['build'=>'vite build'],'devDependencies'=>['vite'=>'^5.0.0','laravel-vite-plugin'=>'^1.0.0']]),
+    'vite.config.js' => "import { defineConfig } from 'vite';\nimport laravel from 'laravel-vite-plugin';\nexport default defineConfig({ plugins: [laravel({ input: ['resources/css/app.css', 'resources/js/app.js'], refresh: true })] });",
+    'resources/js/bootstrap.js' => "import axios from 'axios';\nwindow.axios = axios;",
+];
+nira_validate_frontend_build_contracts($frontendFixture);
+$frontendBroken = $frontendFixture;
+$frontendBroken['package.json'] = json_encode(['scripts'=>['build'=>'echo done'],'devDependencies'=>['vite'=>'^5.0.0']]);
+try { nira_validate_frontend_build_contracts($frontendBroken); throw new RuntimeException('Broken frontend build manifest was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'vite build script')) throw $error; }
+$frontendBroken = $frontendFixture;
+$frontendBroken['vite.config.js'] = "export default {};";
+try { nira_validate_frontend_build_contracts($frontendBroken); throw new RuntimeException('Missing Vite Laravel entries were not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'vite.config.js')) throw $error; }
+
 nira_validate_checkpoint_file_map($valid);
 
 $matchingHash = hash('sha256', 'same exact prompt');

@@ -68,6 +68,38 @@ function nira_validate_model_schema_columns(array $files): void {
     }
 }
 
+/** Ensure the frontend manifest, Vite entrypoints and CI build command agree. */
+function nira_validate_frontend_build_contracts(array $files): void {
+    foreach (['package.json','vite.config.js','resources/js/bootstrap.js'] as $requiredPath) {
+        if (!isset($files[$requiredPath]) || trim((string)$files[$requiredPath]) === '') {
+            throw new RuntimeException('Laravel frontend build is missing required file: '.$requiredPath.'.');
+        }
+    }
+    $manifest = json_decode($files['package.json'], true);
+    if (!is_array($manifest) || !is_array($manifest['scripts'] ?? null)
+        || !isset($manifest['scripts']['build']) || !is_string($manifest['scripts']['build'])
+        || !str_contains($manifest['scripts']['build'], 'vite build')) {
+        throw new RuntimeException('package.json must define a working vite build script.');
+    }
+    $dependencies = array_merge(
+        is_array($manifest['dependencies'] ?? null) ? $manifest['dependencies'] : [],
+        is_array($manifest['devDependencies'] ?? null) ? $manifest['devDependencies'] : []
+    );
+    if (!isset($dependencies['vite']) || !isset($dependencies['laravel-vite-plugin'])) {
+        throw new RuntimeException('package.json must include vite and laravel-vite-plugin dependencies.');
+    }
+    $vite = $files['vite.config.js'];
+    foreach (['laravel-vite-plugin','resources/css/app.css','resources/js/app.js'] as $needle) {
+        if (!str_contains($vite, $needle)) {
+            throw new RuntimeException('vite.config.js is missing the required Laravel asset entry: '.$needle.'.');
+        }
+    }
+    $bootstrap = $files['resources/js/bootstrap.js'];
+    if (strlen(trim($bootstrap)) < 20) {
+        throw new RuntimeException('resources/js/bootstrap.js is incomplete.');
+    }
+}
+
 /** Validate generated PHP, App imports, route actions, and static view references. */
 function nira_validate_project_source_contracts(array $files): void {
     $symbols=[]; $methodsByPath=[];
