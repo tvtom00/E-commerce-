@@ -1344,6 +1344,10 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
     allow_long_execution();
     $GLOBALS['NIRA_SSE_MODE'] = (($_GET['stream'] ?? '') === '1');
     if (!empty($GLOBALS['NIRA_SSE_MODE'])) {
+        // Generation is server-owned: keep PHP working if the phone locks, the
+        // browser tab closes, or the client network drops the SSE connection.
+        // Progress remains checkpointed and can be recovered with the same prompt/name.
+        ignore_user_abort(true);
         while (ob_get_level() > 0) @ob_end_flush();
         @ini_set('zlib.output_compression', '0');
         @ini_set('output_buffering', 'off');
