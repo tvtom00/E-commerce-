@@ -24,6 +24,30 @@ function expect_project_failure(array $files, string $expected): void {
 
 $valid=fixture_project();
 nira_validate_project_source_contracts($valid);
+nira_validate_checkpoint_file_map($valid);
+
+$matchingHash = hash('sha256', 'same exact prompt');
+if (!nira_checkpoint_matches_request(['prompt_hash'=>$matchingHash,'project'=>'my-store'], $matchingHash)) {
+    throw new RuntimeException('Exact checkpoint prompt hash was not accepted.');
+}
+if (nira_checkpoint_matches_request(['prompt_hash'=>$matchingHash,'project'=>'my-store'], hash('sha256', 'different prompt'))) {
+    throw new RuntimeException('Checkpoint with a changed prompt was incorrectly accepted.');
+}
+
+$checkpointBroken = $valid;
+$checkpointBroken['resources/views/store/oversized.blade.php'] = str_repeat('x', 524289);
+try { nira_validate_checkpoint_file_map($checkpointBroken); throw new RuntimeException('Oversized checkpoint file was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), '512 KB')) throw $error; }
+
+$checkpointBroken = $valid;
+$checkpointBroken['resources/views/store/secret.php'] = '<?php $key = "AIza'.str_repeat('A', 35).'";';
+try { nira_validate_checkpoint_file_map($checkpointBroken); throw new RuntimeException('Secret-bearing checkpoint file was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'possible secret')) throw $error; }
+
+$checkpointBroken = $valid;
+$checkpointBroken['resources/views/Store/index.blade.php'] = '<p>case collision</p>';
+try { nira_validate_checkpoint_file_map($checkpointBroken); throw new RuntimeException('Case-insensitive checkpoint path collision was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'case-insensitive duplicate')) throw $error; }
 
 $schemaFixture=$valid;
 $schemaFixture['database/migrations/2025_01_01_000000_create_users_table.php']="<?php\nuse Illuminate\\Support\\Facades\\Schema;\nSchema::create('users', function (\$table) { \$table->id(); \$table->string('name'); \$table->string('email'); \$table->timestamps(); });";
