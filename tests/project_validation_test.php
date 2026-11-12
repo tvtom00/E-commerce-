@@ -31,6 +31,12 @@ if (!is_string($builderSource) || !str_contains($builderSource, 'function ai_gen
     || !str_contains($builderSource, 'checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex-1')) {
     throw new RuntimeException('Adaptive single-file recovery or per-file checkpoint contract is missing.');
 }
+if (!str_contains($builderSource, '$safeRead = strtoupper($method) === \'GET\';')
+    || !str_contains($builderSource, 'safe_read_retry')
+    || !str_contains($builderSource, 'in_array($status, [429,500,502,503,504], true)')
+    || !str_contains($builderSource, '$safeRead && $attempt < 3')) {
+    throw new RuntimeException('GitHub API safe-read retry policy is missing or is not bounded to GET requests.');
+}
 
 $valid=fixture_project();
 nira_validate_project_source_contracts($valid);
