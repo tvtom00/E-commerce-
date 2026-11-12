@@ -25,6 +25,8 @@ function expect_project_failure(array $files, string $expected): void {
 $builderSource = file_get_contents(__DIR__.'/../public/index.php');
 if (!is_string($builderSource) || !str_contains($builderSource, 'function ai_generate_batch_adaptively')
     || !str_contains($builderSource, 'ADAPTIVE RECOVERY / SINGLE FILE MODE')
+    || !str_contains($builderSource, 'INVENTORY RETRY ')
+    || !str_contains($builderSource, 'after 3 attempts')
     || !str_contains($builderSource, 'checkpoint_save_github($checkpoint,[$path=>$content]')
     || !str_contains($builderSource, 'checkpoint_save_local($resumeId,$allGeneratedFiles,$batchIndex-1')) {
     throw new RuntimeException('Adaptive single-file recovery or per-file checkpoint contract is missing.');
