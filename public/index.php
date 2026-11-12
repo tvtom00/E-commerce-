@@ -1453,7 +1453,7 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
             }
         } catch(Throwable $e) {
             error_log('[NIRA_BUILDER_CHECKPOINT] batch='.$batch['name'].' error='.substr(preg_replace('/\s+/',' ',$e->getMessage()),0,500));
-            respond(502,['error'=>'Could not save the completed batch checkpoint.','detail'=>$e->getMessage()]);
+            respond(502,['error'=>'Completed batch failed safety validation or could not be checkpointed.','detail'=>$e->getMessage()]);
         }
         save_preview_snapshot($previewId,$allGeneratedFiles);
         progress_event('progress',['resume_id'=>$resumeId,'resume_storage'=>$resumeStorage,'stage'=>$batch['name'].'_complete',
