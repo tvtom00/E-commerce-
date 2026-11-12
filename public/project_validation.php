@@ -204,6 +204,44 @@ function nira_validate_unique_project_paths(array $files): void {
     }
 }
 
+/** Reject unsafe or oversized files before a generation batch is persisted as a checkpoint. */
+function nira_validate_checkpoint_file_map(array $files): void {
+    if (count($files) > 2000) throw new RuntimeException('Checkpoint exceeds the 2000-file safety limit.');
+    $totalBytes = 0;
+    foreach ($files as $path => $content) {
+        if (!is_string($path) || !is_string($content) || $path === '' || str_contains($path, chr(92)) || str_starts_with($path, '/')) {
+            throw new RuntimeException('Checkpoint contains an invalid file path or non-text file content.');
+        }
+        $parts = explode('/', $path);
+        if (in_array('', $parts, true) || in_array('.', $parts, true) || in_array('..', $parts, true)
+            || in_array('vendor', $parts, true) || in_array('node_modules', $parts, true)
+            || in_array('.git', $parts, true) || in_array('storage', $parts, true)) {
+            throw new RuntimeException('Checkpoint contains an unsafe file path: '.$path.'.');
+        }
+        $base = strtolower((string)end($parts));
+        if (($base === '.env' || str_starts_with($base, '.env.')) && $base !== '.env.example') {
+            throw new RuntimeException('Checkpoint contains a real environment file: '.$path.'.');
+        }
+        if (!preg_match('/[.](php|css|js|json|md|ya?ml|xml|txt|htaccess|sh)$/i', $path)
+            && !in_array($base, ['artisan','dockerfile','.gitignore','.env.example'], true)) {
+            throw new RuntimeException('Checkpoint contains an unsupported or binary file: '.$path.'.');
+        }
+        if (strlen($content) > 524288) throw new RuntimeException('Checkpoint file exceeds the 512 KB limit: '.$path.'.');
+        $totalBytes += strlen($content);
+        if ($totalBytes > 50000000) throw new RuntimeException('Checkpoint exceeds the 50 MB total source limit.');
+        if (preg_match('/(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{30,}|GOCSPX-[A-Za-z0-9_-]{20,}|[0-9]{8,}:[A-Za-z0-9_-]{25,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/', $content)) {
+            throw new RuntimeException('Checkpoint contains a possible secret in '.$path.'.');
+        }
+    }
+    nira_validate_unique_project_paths($files);
+}
+
+/** A checkpoint can resume only when its exact saved prompt hash matches. */
+function nira_checkpoint_matches_request(array $checkpoint, string $promptHash): bool {
+    $savedHash = $checkpoint['prompt_hash'] ?? null;
+    return is_string($savedHash) && $savedHash !== '' && hash_equals($promptHash, $savedHash);
+}
+
 /**
  * Catch common UI defects that syntax and route checks cannot see:
  * unsafe placeholder links/actions and state-changing forms without CSRF/method spoofing.
