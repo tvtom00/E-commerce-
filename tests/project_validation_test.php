@@ -46,6 +46,43 @@ $frontendFixture = [
     'vite.config.js' => "import { defineConfig } from 'vite';\nimport laravel from 'laravel-vite-plugin';\nexport default defineConfig({ plugins: [laravel({ input: ['resources/css/app.css', 'resources/js/app.js'], refresh: true })] });",
     'resources/js/bootstrap.js' => "import axios from 'axios';\nwindow.axios = axios;",
 ];
+$composerFixture = [
+    'composer.json' => json_encode([
+        'require' => ['php' => '^8.2', 'laravel/framework' => '^10.0'],
+        'require-dev' => ['phpunit/phpunit' => '^10.0'],
+        'autoload' => ['psr-4' => ['App\\\\' => 'app/']],
+        'autoload-dev' => ['psr-4' => ['Tests\\\\' => 'tests/']],
+    ]),
+];
+nira_validate_composer_contracts($composerFixture);
+$composerBroken = $composerFixture;
+$composerBroken['composer.json'] = json_encode([
+    'require' => ['php' => '^8.1', 'laravel/framework' => '^10.0'],
+    'require-dev' => ['phpunit/phpunit' => '^10.0'],
+    'autoload' => ['psr-4' => ['App\\\\' => 'app/']],
+    'autoload-dev' => ['psr-4' => ['Tests\\\\' => 'tests/']],
+]);
+try { nira_validate_composer_contracts($composerBroken); throw new RuntimeException('Unsupported PHP version was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'PHP 8.2')) throw $error; }
+$composerBroken = $composerFixture;
+$composerBroken['composer.json'] = json_encode([
+    'require' => ['php' => '^8.2', 'laravel/framework' => '^9.0'],
+    'require-dev' => ['phpunit/phpunit' => '^10.0'],
+    'autoload' => ['psr-4' => ['App\\\\' => 'app/']],
+    'autoload-dev' => ['psr-4' => ['Tests\\\\' => 'tests/']],
+]);
+try { nira_validate_composer_contracts($composerBroken); throw new RuntimeException('Unsupported Laravel version was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'Laravel 10')) throw $error; }
+$composerBroken = $composerFixture;
+$composerBroken['composer.json'] = json_encode([
+    'require' => ['php' => '^8.2', 'laravel/framework' => '^10.0'],
+    'require-dev' => ['phpunit/phpunit' => '^10.0'],
+    'autoload' => ['psr-4' => ['App\\\\' => 'src/']],
+    'autoload-dev' => ['psr-4' => ['Tests\\\\' => 'tests/']],
+]);
+try { nira_validate_composer_contracts($composerBroken); throw new RuntimeException('Broken Composer PSR-4 mapping was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'App')) throw $error; }
+
 nira_validate_frontend_build_contracts($frontendFixture);
 $frontendBroken = $frontendFixture;
 $frontendBroken['package.json'] = json_encode(['scripts'=>['build'=>'echo done'],'devDependencies'=>['vite'=>'^5.0.0']]);
