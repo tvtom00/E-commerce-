@@ -49,6 +49,21 @@ $checkpointBroken['resources/views/Store/index.blade.php'] = '<p>case collision<
 try { nira_validate_checkpoint_file_map($checkpointBroken); throw new RuntimeException('Case-insensitive checkpoint path collision was not rejected.'); }
 catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'case-insensitive duplicate')) throw $error; }
 
+$checkpointBroken = $valid;
+$checkpointBroken['../escape.php'] = 'unsafe';
+try { nira_validate_checkpoint_file_map($checkpointBroken); throw new RuntimeException('Path traversal checkpoint was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'unsafe file path')) throw $error; }
+
+$checkpointBroken = $valid;
+$checkpointBroken['resources/views/store/file.bin'] = 'binary';
+try { nira_validate_checkpoint_file_map($checkpointBroken); throw new RuntimeException('Unsupported checkpoint file was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'unsupported or binary')) throw $error; }
+
+$checkpointBroken = $valid;
+$checkpointBroken['.env'] = 'APP_KEY=secret';
+try { nira_validate_checkpoint_file_map($checkpointBroken); throw new RuntimeException('Real environment file was not rejected.'); }
+catch (RuntimeException $error) { if (!str_contains($error->getMessage(), 'real environment file')) throw $error; }
+
 $schemaFixture=$valid;
 $schemaFixture['database/migrations/2025_01_01_000000_create_users_table.php']="<?php\nuse Illuminate\\Support\\Facades\\Schema;\nSchema::create('users', function (\$table) { \$table->id(); \$table->string('name'); \$table->string('email'); \$table->timestamps(); });";
 $schemaFixture['app/Models/User.php']="<?php\nnamespace App\\Models;\nclass User { protected \$fillable = ['name', 'email']; }";
