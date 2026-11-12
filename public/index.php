@@ -801,25 +801,61 @@ final class GitHubApiException extends RuntimeException {
 }
 
 function github_api(string $method, string $path, string $token, ?array $payload = null): array {
-    $ch = curl_init('https://api.github.com'.$path);
     $headers = ['Accept: application/vnd.github+json','Authorization: Bearer '.$token,'X-GitHub-Api-Version: 2022-11-28','User-Agent: Nira-Website-Builder'];
-    $opts = [CURLOPT_CUSTOMREQUEST=>$method,CURLOPT_HTTPHEADER=>$headers,CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>35];
-    if ($payload !== null) { $headers[] = 'Content-Type: application/json'; $opts[CURLOPT_HTTPHEADER] = $headers; $opts[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_SLASHES); }
-    curl_setopt_array($ch, $opts);
-    $body = curl_exec($ch);
-    $curlError = curl_error($ch);
-    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    $data = is_string($body) ? json_decode($body, true) : null;
-    if ($status < 200 || $status >= 300 || !is_array($data)) {
+    if ($payload !== null) { $headers[] = 'Content-Type: application/json'; }
+    $safeRead = strtoupper($method) === 'GET';
+    $lastStatus = 0;
+    $lastDetail = 'GitHub returned an unreadable response.';
+    for ($attempt = 1; $attempt <= ($safeRead ? 3 : 1); $attempt++) {
+        $responseHeaders = [];
+        $ch = curl_init('https://api.github.com'.$path);
+        $opts = [
+            CURLOPT_CUSTOMREQUEST=>$method,
+            CURLOPT_HTTPHEADER=>$headers,
+            CURLOPT_RETURNTRANSFER=>true,
+            CURLOPT_CONNECTTIMEOUT=>10,
+            CURLOPT_TIMEOUT=>35,
+            CURLOPT_HEADERFUNCTION=>static function($handle, string $line) use (&$responseHeaders): int {
+                $length = strlen($line);
+                $parts = explode(':', $line, 2);
+                if (count($parts) === 2) $responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+                return $length;
+            },
+        ];
+        if ($payload !== null) $opts[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_SLASHES);
+        curl_setopt_array($ch, $opts);
+        $body = curl_exec($ch);
+        $curlError = curl_error($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        $data = is_string($body) ? json_decode($body, true) : null;
+        if ($status >= 200 && $status < 300 && is_array($data)) return $data;
+
+        $lastStatus = $status;
         $detail = is_array($data) ? (string)($data['message'] ?? '') : '';
         if ($detail === '') $detail = $curlError !== '' ? $curlError : 'GitHub returned an unreadable response.';
-        if ($token !== '') $detail = str_replace($token, '[REDACTED]', $detail);
-        $detail = preg_replace('/(?i)(gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})/', '[REDACTED]', $detail);
-        $detail = substr(trim($detail), 0, 220);
-        throw new GitHubApiException($status, 'GitHub API HTTP '.$status.': '.$detail);
+        $rateLimited = $status === 403 && preg_match('/rate limit|secondary rate limit/i', $detail);
+        $transient = $curlError !== '' && $status === 0 || in_array($status, [429,500,502,503,504], true);
+        $retryDelay = 0;
+        if (isset($responseHeaders['retry-after']) && ctype_digit($responseHeaders['retry-after'])) {
+            $retryDelay = min(15, max(1, (int)$responseHeaders['retry-after']));
+        } elseif (isset($responseHeaders['x-ratelimit-reset']) && ctype_digit($responseHeaders['x-ratelimit-reset'])) {
+            $untilReset = (int)$responseHeaders['x-ratelimit-reset'] - time();
+            if ($untilReset > 0 && $untilReset <= 15) $retryDelay = $untilReset;
+        }
+        if ($safeRead && $attempt < 3 && ($transient || ($rateLimited && $retryDelay > 0))) {
+            if ($retryDelay === 0) $retryDelay = min(4, 2 ** ($attempt - 1));
+            error_log('[NIRA_BUILDER_GITHUB] action=safe_read_retry method=GET status='.$status.' attempt='.$attempt.' delay='.$retryDelay);
+            sleep($retryDelay);
+            continue;
+        }
+        $lastDetail = $detail;
+        break;
     }
-    return $data;
+    if ($token !== '') $lastDetail = str_replace($token, '[REDACTED]', $lastDetail);
+    $lastDetail = preg_replace('/(?i)(gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})/', '[REDACTED]', $lastDetail);
+    $lastDetail = substr(trim($lastDetail), 0, 220);
+    throw new GitHubApiException($lastStatus, 'GitHub API HTTP '.$lastStatus.': '.$lastDetail);
 }
 function github_token_is_valid(): bool {
     $token = envv('NIRA_GITHUB_TOKEN');
