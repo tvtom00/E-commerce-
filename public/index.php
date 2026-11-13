@@ -1584,7 +1584,10 @@ if ($path === '/api/generate' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') 
                 $outputTokens=max(3000,min(8000,(int)envv('NIRA_BATCH_OUTPUT_TOKENS','6000')));
                 $aiResult=ai_request_json($batchText.$compactNote,$outputTokens);
                 break;
-            } catch(AiOutputLimitException|AiJsonFormatException $e) {
+            } catch(Throwable $e) {
+                $adaptiveEligible = $e instanceof AiOutputLimitException || $e instanceof AiJsonFormatException
+                    || preg_match('/HTTP (413|429|500|502|503|504)|rate.?limit|token.?limit|context length|too many tokens|request too large|temporarily overloaded/i', $e->getMessage());
+                if (!$adaptiveEligible) throw $e;
                 if($batchTry>=2) {
                     progress_event('progress',['resume_id'=>$resumeId,'stage'=>'adaptive_recovery','batch'=>$batchIndex+1,
                         'total_batches'=>$batchTotal,'message'=>'বড় ব্যাচ সীমায় আটকে গেছে; একেকটি ফাইল আলাদাভাবে তৈরি হচ্ছে']);
