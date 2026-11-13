@@ -1107,7 +1107,7 @@ function checkpoint_save_github(array $cp, array $newFiles, array $fileShas, int
 }
 
 function ai_generate_batch_adaptively(array $batch, string $system, string $prompt, string $contractContext,
-    array $existingFiles, callable $onFile): array {
+    array $existingFiles, callable $onFile, int $splitDepth = 0): array {
     $patterns = implode("\n- ", $batch['paths']);
     $existingPaths = implode("\n- ", array_slice(array_keys($existingFiles), -180));
     $manifestPrompt = $system."\n\nADAPTIVE RECOVERY / FILE INVENTORY MODE.\n".
@@ -1150,6 +1150,37 @@ function ai_generate_batch_adaptively(array $batch, string $system, string $prom
         }
     }
     if (!$paths) {
+        // If a large inventory request still exceeds provider limits, split its
+        // allowed path patterns in half and process each smaller sub-batch.
+        // Completed files are passed into the next half so no work is repeated.
+        if (count($batch['paths']) > 1 && $splitDepth < 8) {
+            $halves = array_chunk($batch['paths'], (int)ceil(count($batch['paths']) / 2));
+            $splitCreated = [];
+            foreach ($halves as $halfIndex => $halfPaths) {
+                $subBatch = $batch;
+                $subBatch['name'] = $batch['name'].'_part_'.($halfIndex + 1);
+                $subBatch['paths'] = $halfPaths;
+                progress_event('progress', [
+                    'stage'=>'adaptive_batch_split',
+                    'batch'=>$batch['name'],
+                    'split_depth'=>$splitDepth + 1,
+                    'part'=>$halfIndex + 1,
+                    'parts'=>count($halves),
+                    'message'=>'রিকোয়েস্ট সীমা হয়েছে; কাজ অর্ধেক করে ছোট ব্যাচে আবার শুরু হচ্ছে'
+                ]);
+                $subFiles = ai_generate_batch_adaptively(
+                    $subBatch, $system, $prompt, $contractContext,
+                    array_merge($existingFiles, $splitCreated),
+                    static function(string $path, string $content, array $created) use (&$splitCreated, $onFile): void {
+                        $splitCreated[$path] = $content;
+                        $onFile($path, $content, $created);
+                    },
+                    $splitDepth + 1
+                );
+                $splitCreated = array_merge($splitCreated, $subFiles);
+            }
+            return $splitCreated;
+        }
         throw new RuntimeException('Adaptive recovery could not produce a safe bounded file inventory after 3 attempts: '.
             ($manifestError?->getMessage() ?? 'unknown inventory failure'));
     }
